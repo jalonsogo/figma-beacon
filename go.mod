@@ -1,4 +1,4 @@
-module tui-gradient
+module figma-beacon
 
 go 1.24.5
 

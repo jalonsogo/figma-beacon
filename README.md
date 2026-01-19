@@ -18,7 +18,7 @@ A terminal user interface (TUI) application built with Go and Bubbletea, based o
 
 ```bash
 # Clone or navigate to the project directory
-cd tui-gradient
+cd figma-beacon
 
 # Build the application
 go build -o figma-beacon

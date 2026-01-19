@@ -1,6 +1,5 @@
 # Binaries
 figma-beacon
-tui-gradient
 
 # Go build artifacts
 *.exe

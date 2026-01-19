@@ -74,6 +74,7 @@ type FigmaFile struct {
 type timeMode string
 
 const (
+	timeModeLastWeek        timeMode = "last_week"
 	timeModeLastMonth       timeMode = "last_month"
 	timeModeThisMonthToDate timeMode = "this_month_to_date"
 	timeModeLast4Weeks      timeMode = "last_4_weeks"
@@ -544,7 +545,7 @@ func initialModel() model {
 		listOffset:          0,
 		showDeleteConfirm:   false,
 		deleteProfileName:   "",
-		reportTimeOptions:   []string{"Last Month", "This Month to Date", "Last 4 Weeks", "Last 30 Days"},
+		reportTimeOptions:   []string{"Last Week", "Last Month", "This Month to Date", "Last 4 Weeks", "Last 30 Days"},
 		reportTimeIndex:     0,
 		reportProfileIndex:  0,
 		generatingReport:    false,
@@ -802,12 +803,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var selectedMode timeMode
 				switch m.reportTimeIndex {
 				case 0:
-					selectedMode = timeModeLastMonth
+					selectedMode = timeModeLastWeek
 				case 1:
-					selectedMode = timeModeThisMonthToDate
+					selectedMode = timeModeLastMonth
 				case 2:
-					selectedMode = timeModeLast4Weeks
+					selectedMode = timeModeThisMonthToDate
 				case 3:
+					selectedMode = timeModeLast4Weeks
+				case 4:
 					selectedMode = timeModeLast30Days
 				}
 
@@ -1483,16 +1486,9 @@ func (m model) viewMainMenu() string {
 		lipgloss.Color("#ea4536"), // red
 	}
 
-	// Create 3-line gradient header with text in the middle
-	topGradientLine := createGradientBar(m.width, gradientColors)
-	bottomGradientLine := createGradientBar(m.width, gradientColors)
-
-	// Create middle line with gradient and overlay text
+	// Header text
 	titleText := "▨ FIGMA BEACON"
 	statusText := m.profileStatus
-
-	// Create middle line with gradient and overlay text
-	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
 
 	// Menu items
 	var menuStrings []string
@@ -1545,13 +1541,9 @@ func (m model) viewMainMenu() string {
 		menuStrings = append(menuStrings, menuLine)
 	}
 
-	menuSection := lipgloss.NewStyle().
+	content := lipgloss.NewStyle().
 		Padding(0, 1).
-		Background(bgColor).
 		Render(strings.Join(menuStrings, "\n"))
-
-	// Create gradient divider
-	divider := createGradientDivider(m.width, gradientColors)
 
 	// Footer with keyboard shortcuts
 	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
@@ -1577,20 +1569,8 @@ func (m model) viewMainMenu() string {
 		Padding(0, 1).
 		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
 
-	// Combine all sections
-	var sections []string
-	sections = append(sections, topGradientLine)
-	sections = append(sections, middleGradientLine)
-	sections = append(sections, bottomGradientLine)
-	sections = append(sections, menuSection)
-	sections = append(sections, divider)
-	sections = append(sections, footer)
-
-	return lipgloss.NewStyle().
-		Background(bgColor).
-		Height(m.height).
-		Width(m.width).
-		Render(strings.Join(sections, "\n"))
+	// Use responsive layout
+	return createResponsiveLayout(m.width, m.height, bgColor, gradientColors, titleText, statusText, whiteColor, statusBgColor, content, footer)
 }
 
 func (m model) viewSetupScreen() string {
@@ -1612,12 +1592,9 @@ func (m model) viewSetupScreen() string {
 		lipgloss.Color("#ea4536"), // red
 	}
 
-	// Create 3-line gradient header
-	topGradientLine := createGradientBar(m.width, gradientColors)
-	bottomGradientLine := createGradientBar(m.width, gradientColors)
+	// Header text
 	titleText := "▨ FIGMA BEACON"
 	statusText := m.profileStatus
-	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
 
 	// Setup menu items
 	var userIDValue string
@@ -1763,13 +1740,9 @@ func (m model) viewSetupScreen() string {
 
 	menuStrings = append(menuStrings, "") // Empty line at bottom
 
-	menuSection := lipgloss.NewStyle().
+	content := lipgloss.NewStyle().
 		Padding(0, 1).
-		Background(bgColor).
 		Render(strings.Join(menuStrings, "\n"))
-
-	// Create gradient divider
-	divider := createGradientDivider(m.width, gradientColors)
 
 	// Footer
 	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
@@ -1794,20 +1767,8 @@ func (m model) viewSetupScreen() string {
 		Padding(0, 1).
 		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
 
-	// Combine all sections
-	var sections []string
-	sections = append(sections, topGradientLine)
-	sections = append(sections, middleGradientLine)
-	sections = append(sections, bottomGradientLine)
-	sections = append(sections, menuSection)
-	sections = append(sections, divider)
-	sections = append(sections, footer)
-
-	return lipgloss.NewStyle().
-		Background(bgColor).
-		Height(m.height).
-		Width(m.width).
-		Render(strings.Join(sections, "\n"))
+	// Use responsive layout
+	return createResponsiveLayout(m.width, m.height, bgColor, gradientColors, titleText, statusText, whiteColor, statusBgColor, content, footer)
 }
 
 func (m model) viewManageProfiles() string {
@@ -1829,12 +1790,9 @@ func (m model) viewManageProfiles() string {
 		lipgloss.Color("#ea4536"), // red
 	}
 
-	// Create 3-line gradient header
-	topGradientLine := createGradientBar(m.width, gradientColors)
-	bottomGradientLine := createGradientBar(m.width, gradientColors)
+	// Header text
 	titleText := "▨ FIGMA BEACON"
 	statusText := m.profileStatus
-	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
 
 	// Build profile list
 	var menuStrings []string
@@ -1984,8 +1942,8 @@ func (m model) viewManageProfiles() string {
 		menuSection = strings.Join(menuLines, "\n")
 	}
 
-	// Create gradient divider
-	divider := createGradientDivider(m.width, gradientColors)
+	// Convert menuSection to final content
+	content := menuSection
 
 	// Footer
 	var leftShortcuts string
@@ -2029,20 +1987,8 @@ func (m model) viewManageProfiles() string {
 		Padding(0, 1).
 		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
 
-	// Combine all sections
-	var sections []string
-	sections = append(sections, topGradientLine)
-	sections = append(sections, middleGradientLine)
-	sections = append(sections, bottomGradientLine)
-	sections = append(sections, menuSection)
-	sections = append(sections, divider)
-	sections = append(sections, footer)
-
-	return lipgloss.NewStyle().
-		Background(bgColor).
-		Height(m.height).
-		Width(m.width).
-		Render(strings.Join(sections, "\n"))
+	// Use responsive layout
+	return createResponsiveLayout(m.width, m.height, bgColor, gradientColors, titleText, statusText, whiteColor, statusBgColor, content, footer)
 }
 
 func (m model) viewProfileWizard() string {
@@ -2064,12 +2010,9 @@ func (m model) viewProfileWizard() string {
 		lipgloss.Color("#ea4536"), // red
 	}
 
-	// Create 3-line gradient header
-	topGradientLine := createGradientBar(m.width, gradientColors)
-	bottomGradientLine := createGradientBar(m.width, gradientColors)
+	// Header text
 	titleText := "▨ FIGMA BEACON"
 	statusText := m.profileStatus
-	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
 
 	// Build wizard screen based on current step
 	var menuStrings []string
@@ -2245,13 +2188,9 @@ func (m model) viewProfileWizard() string {
 
 	menuStrings = append(menuStrings, "")
 
-	menuSection := lipgloss.NewStyle().
+	content := lipgloss.NewStyle().
 		Padding(0, 1).
-		Background(bgColor).
 		Render(strings.Join(menuStrings, "\n"))
-
-	// Create gradient divider
-	divider := createGradientDivider(m.width, gradientColors)
 
 	// Footer with dynamic shortcuts based on wizard step
 	var leftShortcuts string
@@ -2296,20 +2235,8 @@ func (m model) viewProfileWizard() string {
 		Padding(0, 1).
 		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
 
-	// Combine all sections
-	var sections []string
-	sections = append(sections, topGradientLine)
-	sections = append(sections, middleGradientLine)
-	sections = append(sections, bottomGradientLine)
-	sections = append(sections, menuSection)
-	sections = append(sections, divider)
-	sections = append(sections, footer)
-
-	return lipgloss.NewStyle().
-		Background(bgColor).
-		Height(m.height).
-		Width(m.width).
-		Render(strings.Join(sections, "\n"))
+	// Use responsive layout
+	return createResponsiveLayout(m.width, m.height, bgColor, gradientColors, titleText, statusText, whiteColor, statusBgColor, content, footer)
 }
 
 type rgb struct {
@@ -2368,12 +2295,9 @@ func (m model) viewProfilePreview() string {
 		lipgloss.Color("#ea4536"), // red
 	}
 
-	// Create 3-line gradient header
-	topGradientLine := createGradientBar(m.width, gradientColors)
-	bottomGradientLine := createGradientBar(m.width, gradientColors)
+	// Header text
 	titleText := "▨ FIGMA BEACON"
 	statusText := m.profileStatus
-	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
 
 	// Build profile preview content
 	var contentStrings []string
@@ -2420,13 +2344,11 @@ func (m model) viewProfilePreview() string {
 	contentStrings = append(contentStrings, "")
 	contentStrings = append(contentStrings, "")
 
-	contentSection := lipgloss.NewStyle().
+	content := lipgloss.NewStyle().
 		Padding(0, 1).
 		Background(bgColor).
 		Render(strings.Join(contentStrings, "\n"))
 
-	// Create gradient divider
-	divider := createGradientDivider(m.width, gradientColors)
 
 	// Footer
 	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
@@ -2456,20 +2378,8 @@ func (m model) viewProfilePreview() string {
 		Padding(0, 1).
 		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
 
-	// Combine all sections
-	var sections []string
-	sections = append(sections, topGradientLine)
-	sections = append(sections, middleGradientLine)
-	sections = append(sections, bottomGradientLine)
-	sections = append(sections, contentSection)
-	sections = append(sections, divider)
-	sections = append(sections, footer)
-
-	return lipgloss.NewStyle().
-		Background(bgColor).
-		Height(m.height).
-		Width(m.width).
-		Render(strings.Join(sections, "\n"))
+	// Use responsive layout
+	return createResponsiveLayout(m.width, m.height, bgColor, gradientColors, titleText, statusText, whiteColor, statusBgColor, content, footer)
 }
 
 func resolveTimeWindow(config ReportConfig) TimeWindow {
@@ -2477,6 +2387,11 @@ func resolveTimeWindow(config ReportConfig) TimeWindow {
 	var start, end time.Time
 
 	switch config.TimeMode {
+	case timeModeLastWeek:
+		// Last 7 days
+		start = now.AddDate(0, 0, -7)
+		end = now
+
 	case timeModeLastMonth:
 		// Previous calendar month
 		firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
@@ -2758,12 +2673,9 @@ func (m model) viewReportView() string {
 		lipgloss.Color("#ea4536"), // red
 	}
 
-	// Create 3-line gradient header
-	topGradientLine := createGradientBar(m.width, gradientColors)
-	bottomGradientLine := createGradientBar(m.width, gradientColors)
+	// Header text
 	titleText := "▨ FIGMA BEACON"
 	statusText := m.profileStatus
-	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
 
 	// Build report display
 	var contentStrings []string
@@ -2810,13 +2722,11 @@ func (m model) viewReportView() string {
 
 	contentStrings = append(contentStrings, "")
 
-	contentSection := lipgloss.NewStyle().
+	content := lipgloss.NewStyle().
 		Padding(0, 1).
 		Background(bgColor).
 		Render(strings.Join(contentStrings, "\n"))
 
-	// Create gradient divider
-	divider := createGradientDivider(m.width, gradientColors)
 
 	// Footer
 	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
@@ -2838,20 +2748,8 @@ func (m model) viewReportView() string {
 		Padding(0, 1).
 		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
 
-	// Combine all sections
-	var sections []string
-	sections = append(sections, topGradientLine)
-	sections = append(sections, middleGradientLine)
-	sections = append(sections, bottomGradientLine)
-	sections = append(sections, contentSection)
-	sections = append(sections, divider)
-	sections = append(sections, footer)
-
-	return lipgloss.NewStyle().
-		Background(bgColor).
-		Height(m.height).
-		Width(m.width).
-		Render(strings.Join(sections, "\n"))
+	// Use responsive layout
+	return createResponsiveLayout(m.width, m.height, bgColor, gradientColors, titleText, statusText, whiteColor, statusBgColor, content, footer)
 }
 
 func (m model) viewReportConfig() string {
@@ -2872,12 +2770,9 @@ func (m model) viewReportConfig() string {
 		lipgloss.Color("#ea4536"), // red
 	}
 
-	// Create 3-line gradient header
-	topGradientLine := createGradientBar(m.width, gradientColors)
-	bottomGradientLine := createGradientBar(m.width, gradientColors)
+	// Header text
 	titleText := "▨ FIGMA BEACON"
 	statusText := m.profileStatus
-	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
 
 	// Build configuration screen
 	var contentStrings []string
@@ -2958,13 +2853,11 @@ func (m model) viewReportConfig() string {
 	contentStrings = append(contentStrings, "")
 	contentStrings = append(contentStrings, "")
 
-	contentSection := lipgloss.NewStyle().
+	content := lipgloss.NewStyle().
 		Padding(0, 1).
 		Background(bgColor).
 		Render(strings.Join(contentStrings, "\n"))
 
-	// Create gradient divider
-	divider := createGradientDivider(m.width, gradientColors)
 
 	// Footer
 	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
@@ -2994,20 +2887,49 @@ func (m model) viewReportConfig() string {
 		Padding(0, 1).
 		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
 
-	// Combine all sections
-	var sections []string
-	sections = append(sections, topGradientLine)
-	sections = append(sections, middleGradientLine)
-	sections = append(sections, bottomGradientLine)
-	sections = append(sections, contentSection)
-	sections = append(sections, divider)
-	sections = append(sections, footer)
+	// Use responsive layout
+	return createResponsiveLayout(m.width, m.height, bgColor, gradientColors, titleText, statusText, whiteColor, statusBgColor, content, footer)
+}
 
-	return lipgloss.NewStyle().
+// Helper to create responsive layout with footer at bottom
+func createResponsiveLayout(width, height int, bgColor lipgloss.Color, gradientColors []lipgloss.Color, titleText, statusText string, whiteColor, statusBgColor lipgloss.Color, content, footer string) string {
+	// Create header (3 lines)
+	topGradientLine := createGradientBar(width, gradientColors)
+	middleGradientLine := createGradientBarWithText(width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
+	bottomGradientLine := createGradientBar(width, gradientColors)
+
+	// Create divider (1 line)
+	divider := createGradientDivider(width, gradientColors)
+
+	// Calculate heights
+	headerHeight := 3
+	dividerHeight := 1
+	footerHeight := 1
+	spacingHeight := 1 // Extra line below footer
+	contentHeight := height - headerHeight - dividerHeight - footerHeight - spacingHeight
+
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+
+	// Make content fill available space
+	contentRendered := lipgloss.NewStyle().
 		Background(bgColor).
-		Height(m.height).
-		Width(m.width).
-		Render(strings.Join(sections, "\n"))
+		Width(width).
+		Height(contentHeight).
+		Render(content)
+
+	// Combine all sections vertically
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		topGradientLine,
+		middleGradientLine,
+		bottomGradientLine,
+		contentRendered,
+		divider,
+		footer,
+		"", // spacing line below footer
+	)
 }
 
 func createGradientBar(width int, colors []lipgloss.Color) string {
