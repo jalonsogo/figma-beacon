@@ -46,6 +46,22 @@ Run the application:
 2. **Manage Profiles** - Create, edit and manage your profiles
 3. **Setup** - Configure API token and more
 
+## Configuration
+
+The application automatically saves your setup configuration to:
+```
+~/.config/figma-beacon/config.json
+```
+
+### Setup Options
+
+- **Set Figma Token** - Your Figma personal access token
+- **Set User ID** - Click "Gather" to fetch your user info from Figma API (requires token)
+- **Set Team ID** - Your Figma team identifier
+- **Report format** - Choose between JSON, Markdown, TXT, or HTML
+
+All values are automatically saved when you change them and loaded on application startup.
+
 ## Development
 
 The TUI is built with:
