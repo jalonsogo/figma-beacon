@@ -2,6 +2,8 @@
 
 A powerful terminal user interface (TUI) application for tracking and reporting your Figma activity. Monitor your team's projects, track file modifications, and generate beautiful activity reports directly from your terminal.
 
+![](assets/cover.png)
+
 ## Features
 
 ### Profile Management
