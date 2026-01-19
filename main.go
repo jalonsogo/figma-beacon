@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -3122,7 +3123,323 @@ func createGradientDivider(width int, colors []lipgloss.Color) string {
 	return result
 }
 
+func runCLI(profileName, timeframe, projectsStr, userID, format string, saveReport bool) error {
+	// Load configuration
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.FigmaToken == "" {
+		return fmt.Errorf("Figma token not configured. Run setup first or use the TUI")
+	}
+
+	// Determine profile to use
+	var profile *Profile
+	if projectsStr == "" && userID == "" {
+		// Load from profile
+		if profileName == "" {
+			profileName = "default"
+		}
+
+		profiles, err := loadAllProfiles()
+		if err != nil {
+			return fmt.Errorf("failed to load profiles: %w", err)
+		}
+
+		// Find profile by name or default
+		for i := range profiles {
+			if profileName == "default" && profiles[i].IsDefault {
+				profile = &profiles[i]
+				break
+			} else if profiles[i].Name == profileName {
+				profile = &profiles[i]
+				break
+			}
+		}
+
+		if profile == nil {
+			if profileName == "default" {
+				return fmt.Errorf("no default profile found. Create a profile using the TUI or specify -proj and -u flags")
+			}
+			return fmt.Errorf("profile '%s' not found", profileName)
+		}
+	} else {
+		// Override with CLI flags
+		if projectsStr != "" && userID == "" {
+			fmt.Fprintf(os.Stderr, "Warning: -proj specified without -u. Using user from config.\n")
+		}
+		if userID != "" && projectsStr == "" {
+			return fmt.Errorf("-u flag requires -proj flag to specify which projects to scan")
+		}
+
+		// Parse project IDs
+		projectIDs := strings.Split(projectsStr, ",")
+		var projects []ProfileProject
+		for _, id := range projectIDs {
+			id = strings.TrimSpace(id)
+			if id != "" {
+				projects = append(projects, ProfileProject{
+					ID:   id,
+					Name: id, // We don't have the name, use ID
+				})
+			}
+		}
+
+		profile = &Profile{
+			Name:             "cli-override",
+			TeamID:           cfg.TeamID,
+			SelectedProjects: projects,
+		}
+
+		// Override user if provided
+		if userID != "" {
+			cfg.UserID = userID
+			// Try to fetch user handle
+			client := &http.Client{Timeout: 10 * time.Second}
+			req, _ := http.NewRequest("GET", "https://api.figma.com/v1/me", nil)
+			req.Header.Set("X-Figma-Token", cfg.FigmaToken)
+			resp, err := client.Do(req)
+			if err == nil && resp.StatusCode == 200 {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				var result struct {
+					Handle string `json:"handle"`
+				}
+				if json.Unmarshal(body, &result) == nil {
+					cfg.UserHandle = result.Handle
+				}
+			}
+		}
+
+		if projectsStr != "" {
+			fmt.Fprintf(os.Stderr, "Warning: Using -proj and -u flags overrides profile settings.\n")
+		}
+	}
+
+	// Parse timeframe
+	var timeMode timeMode
+	switch strings.ToLower(timeframe) {
+	case "week", "7d":
+		timeMode = timeModeLastWeek
+	case "month":
+		timeMode = timeModeLastMonth
+	case "m2d", "mtd":
+		timeMode = timeModeThisMonthToDate
+	case "4w", "28d":
+		timeMode = timeModeLast4Weeks
+	case "30d":
+		timeMode = timeModeLast30Days
+	default:
+		return fmt.Errorf("invalid timeframe '%s'. Valid options: week, month, m2d, 4w, 30d", timeframe)
+	}
+
+	// Generate report
+	reportConfig := ReportConfig{
+		TimeMode: timeMode,
+	}
+
+	window := resolveTimeWindow(reportConfig)
+
+	// Fetch activity
+	client := &http.Client{Timeout: 30 * time.Second}
+	var files []FileActivity
+
+	for _, project := range profile.SelectedProjects {
+		// Fetch files for this project
+		url := fmt.Sprintf("https://api.figma.com/v1/projects/%s/files", project.ID)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("X-Figma-Token", cfg.FigmaToken)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			continue
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		var projectFilesResp struct {
+			Files []struct {
+				Key  string `json:"key"`
+				Name string `json:"name"`
+			} `json:"files"`
+		}
+		if err := json.Unmarshal(body, &projectFilesResp); err != nil {
+			continue
+		}
+
+		// For each file, check if user modified it in time window
+		for _, fileInfo := range projectFilesResp.Files {
+			// Get file metadata
+			fileURL := fmt.Sprintf("https://api.figma.com/v1/files/%s", fileInfo.Key)
+			fileReq, err := http.NewRequest("GET", fileURL, nil)
+			if err != nil {
+				continue
+			}
+			fileReq.Header.Set("X-Figma-Token", cfg.FigmaToken)
+
+			fileResp, err := client.Do(fileReq)
+			if err != nil {
+				continue
+			}
+
+			if fileResp.StatusCode != 200 {
+				fileResp.Body.Close()
+				continue
+			}
+
+			fileBody, _ := io.ReadAll(fileResp.Body)
+			fileResp.Body.Close()
+
+			var fileData struct {
+				Name         string    `json:"name"`
+				LastModified time.Time `json:"lastModified"`
+			}
+			json.Unmarshal(fileBody, &fileData)
+
+			// Get file version history to determine created date
+			versionsURL := fmt.Sprintf("https://api.figma.com/v1/files/%s/versions", fileInfo.Key)
+			versionsReq, err := http.NewRequest("GET", versionsURL, nil)
+			if err == nil {
+				versionsReq.Header.Set("X-Figma-Token", cfg.FigmaToken)
+				versionsResp, err := client.Do(versionsReq)
+				if err == nil && versionsResp.StatusCode == 200 {
+					versionsBody, _ := io.ReadAll(versionsResp.Body)
+					versionsResp.Body.Close()
+
+					var versionsData struct {
+						Versions []struct {
+							CreatedAt time.Time `json:"created_at"`
+						} `json:"versions"`
+					}
+					json.Unmarshal(versionsBody, &versionsData)
+
+					// Get earliest version (file creation date)
+					var createdAt time.Time
+					if len(versionsData.Versions) > 0 {
+						createdAt = versionsData.Versions[len(versionsData.Versions)-1].CreatedAt
+					}
+
+					// Check if file was created in the time window
+					createdInWindow := false
+					if !createdAt.IsZero() && createdAt.After(window.Start) && createdAt.Before(window.End) {
+						createdInWindow = true
+					}
+
+					// Check if file was modified in the time window
+					myChanges := false
+					if fileData.LastModified.After(window.Start) && fileData.LastModified.Before(window.End) {
+						myChanges = true
+					}
+
+					// Only include files with activity (created or modified in window)
+					if myChanges || createdInWindow {
+						files = append(files, FileActivity{
+							FileKey:         fileInfo.Key,
+							FileName:        fileData.Name,
+							ProjectName:     project.Name,
+							LastModified:    fileData.LastModified,
+							CreatedAt:       createdAt,
+							MyChanges:       myChanges,
+							CreatedInWindow: createdInWindow,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Build report
+	report := &ActivityReport{
+		TimeWindow:   window,
+		UserID:       cfg.UserID,
+		UserHandle:   cfg.UserHandle,
+		Files:        files,
+		TotalFiles:   len(files),
+		TotalChanges: 0,
+		GeneratedAt:  time.Now(),
+	}
+
+	// Count total changes
+	for _, file := range files {
+		if file.MyChanges {
+			report.TotalChanges++
+		}
+	}
+
+	// Format output
+	var output string
+	switch format {
+	case "json":
+		jsonData, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal JSON: %w", err)
+		}
+		output = string(jsonData)
+	case "md", "markdown":
+		output = formatReportMarkdown(report)
+	default:
+		return fmt.Errorf("invalid format '%s'. Valid options: json, md", format)
+	}
+
+	// Output to stdout
+	fmt.Println(output)
+
+	// Save to file if requested
+	if saveReport {
+		reportsDir := "reports"
+		if err := os.MkdirAll(reportsDir, 0755); err != nil {
+			return fmt.Errorf("failed to create reports directory: %w", err)
+		}
+
+		timestamp := time.Now().Format("2006-01-02-150405")
+		fileName := fmt.Sprintf("%s/%s-%s.%s", reportsDir, profile.Name, timestamp, format)
+		if format == "markdown" {
+			fileName = fmt.Sprintf("%s/%s-%s.md", reportsDir, profile.Name, timestamp)
+		}
+
+		if err := os.WriteFile(fileName, []byte(output), 0644); err != nil {
+			return fmt.Errorf("failed to save report: %w", err)
+		}
+
+		fmt.Fprintf(os.Stderr, "\nReport saved to: %s\n", fileName)
+	}
+
+	return nil
+}
+
 func main() {
+	// Define CLI flags
+	profileFlag := flag.String("p", "", "Profile name (default: use default profile)")
+	timeframeFlag := flag.String("t", "week", "Timeframe: week, month, m2d, 4w, 30d")
+	projectsFlag := flag.String("proj", "", "Comma-separated project IDs (overrides profile)")
+	userFlag := flag.String("u", "", "User ID (overrides profile)")
+	formatFlag := flag.String("format", "md", "Output format: json, md")
+	reportFlag := flag.Bool("report", false, "Save report to file")
+
+	flag.Parse()
+
+	// Check if running in CLI mode (any flag is set)
+	if flag.NFlag() > 0 {
+		// CLI mode
+		err := runCLI(*profileFlag, *timeframeFlag, *projectsFlag, *userFlag, *formatFlag, *reportFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// TUI mode
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v", err)
