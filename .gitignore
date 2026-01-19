@@ -8,3 +8,6 @@ tui-gradient
 *.dll
 *.so
 *.dylib
+
+# Generated reports
+reports/

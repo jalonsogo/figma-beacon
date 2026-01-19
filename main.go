@@ -22,7 +22,6 @@ type screenState int
 const (
 	mainMenuScreen screenState = iota
 	setupScreen
-	formatSelectionScreen
 	manageProfilesScreen
 	profileWizardScreen
 	profilePreviewScreen
@@ -36,7 +35,6 @@ type wizardStep int
 const (
 	wizardTeamID wizardStep = iota
 	wizardProjects
-	wizardFiles
 	wizardSaveName
 )
 
@@ -45,24 +43,20 @@ type loadingState int
 const (
 	notLoading loadingState = iota
 	loadingProjects
-	loadingFiles
 )
 
 // Profile data structures
-type Profile struct {
-	Name             string         `json:"name"`
-	TeamID           string         `json:"team_id"`
-	SelectedProjects []string       `json:"selected_projects"`
-	SelectedFiles    []SelectedFile `json:"selected_files"`
-	CreatedAt        time.Time      `json:"created_at"`
-	IsDefault        bool           `json:"is_default"`
+type ProfileProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
-type SelectedFile struct {
-	FileID      string `json:"file_id"`
-	FileName    string `json:"file_name"`
-	ProjectID   string `json:"project_id"`
-	ProjectName string `json:"project_name"`
+type Profile struct {
+	Name             string           `json:"name"`
+	TeamID           string           `json:"team_id"`
+	SelectedProjects []ProfileProject `json:"selected_projects"`
+	CreatedAt        time.Time        `json:"created_at"`
+	IsDefault        bool             `json:"is_default"`
 }
 
 type FigmaProject struct {
@@ -76,13 +70,6 @@ type FigmaFile struct {
 	ProjectID string // Not from API, added by us
 }
 
-type FileListItem struct {
-	IsHeader    bool
-	ProjectID   string
-	ProjectName string
-	File        FigmaFile
-}
-
 // Report generator data structures
 type timeMode string
 
@@ -91,15 +78,12 @@ const (
 	timeModeThisMonthToDate timeMode = "this_month_to_date"
 	timeModeLast4Weeks      timeMode = "last_4_weeks"
 	timeModeLast30Days      timeMode = "last_30_days"
-	timeModeCustom          timeMode = "custom"
 )
 
 type ReportConfig struct {
-	TimeMode        timeMode
-	CustomStartDate time.Time
-	CustomEndDate   time.Time
-	FileKeys        []string
-	ProjectID       string
+	TimeMode  timeMode
+	FileKeys  []string
+	ProjectID string
 }
 
 type TimeWindow struct {
@@ -136,13 +120,15 @@ type FigmaComment struct {
 }
 
 type FileActivity struct {
-	FileKey      string
-	FileName     string
-	ProjectName  string
-	Versions     []FigmaVersion
-	Comments     []FigmaComment
-	LastModified time.Time
-	MyChanges    bool // indicates if the user made changes in the time window
+	FileKey         string
+	FileName        string
+	ProjectName     string
+	Versions        []FigmaVersion
+	Comments        []FigmaComment
+	LastModified    time.Time
+	CreatedAt       time.Time
+	MyChanges       bool // indicates if the user made changes in the time window
+	CreatedInWindow bool // indicates if file was created in the time window
 }
 
 type ActivityReport struct {
@@ -167,9 +153,6 @@ type model struct {
 	figmaToken      string
 	userID          string
 	teamID          string
-	reportFormat    string
-	formatOptions   []string
-	formatIndex     int
 	textInput       textinput.Model
 	editingIndex    int  // -1 means not editing, 0-2 means editing that field
 	userHandle      string
@@ -177,22 +160,20 @@ type model struct {
 	fetchingUser    bool
 	userFetchError  string
 	// Profile management fields
-	profiles            []Profile
-	activeProfile       *Profile
-	previewProfile      *Profile
-	wizardStep          wizardStep
-	wizardTeamID        string
-	wizardProjects      []FigmaProject
-	wizardSelectedProj  map[string]bool
-	wizardFiles         []FigmaFile
-	wizardFileList      []FileListItem
-	wizardSelectedFiles map[string]bool
-	wizardProfileName   string
-	loadingState        loadingState
-	loadingError        string
-	loadingProgress     string
-	listOffset          int
-	listCursor          int
+	profiles           []Profile
+	activeProfile      *Profile
+	previewProfile     *Profile
+	wizardStep         wizardStep
+	wizardTeamID       string
+	wizardProjects     []FigmaProject
+	wizardSelectedProj map[string]bool
+	wizardProfileName  string
+	wizardEditMode     bool // true if editing existing profile, false if creating new
+	loadingState       loadingState
+	loadingError       string
+	loadingProgress    string
+	listOffset         int
+	listCursor         int
 	// Delete confirmation
 	showDeleteConfirm bool
 	deleteProfileName string
@@ -200,12 +181,16 @@ type model struct {
 	reportConfig      ReportConfig
 	reportTimeOptions []string
 	reportTimeIndex   int
+	reportProfileIndex int // Selected profile index for report
 	generatingReport  bool
+	reportingProfile  *Profile // Profile being used for current report generation
 	activityReport    *ActivityReport
 	reportError       string
 	reportContent     string
 	exportSuccess     string
 	exportError       string
+	spinnerFrame      int    // Current spinner frame
+	spinnerChars      []string // Spinner characters
 }
 
 type userInfoMsg struct {
@@ -225,15 +210,6 @@ type projectsCompleteMsg struct {
 }
 
 type projectsErrMsg struct {
-	err string
-}
-
-type filesCompleteMsg struct {
-	files []FigmaFile
-	count int
-}
-
-type filesErrMsg struct {
 	err string
 }
 
@@ -263,13 +239,14 @@ type reportExportErrMsg struct {
 	err string
 }
 
+type tickMsg time.Time
+
 type config struct {
-	FigmaToken   string `json:"figma_token"`
-	UserID       string `json:"user_id"`
-	TeamID       string `json:"team_id"`
-	ReportFormat string `json:"report_format"`
-	UserHandle   string `json:"user_handle"`
-	UserEmail    string `json:"user_email"`
+	FigmaToken string `json:"figma_token"`
+	UserID     string `json:"user_id"`
+	TeamID     string `json:"team_id"`
+	UserHandle string `json:"user_handle"`
+	UserEmail  string `json:"user_email"`
 }
 
 type setupItem struct {
@@ -469,11 +446,6 @@ func initialModel() model {
 	// Load saved configuration
 	cfg, _ := loadConfig()
 
-	// Set default report format if not set
-	if cfg.ReportFormat == "" {
-		cfg.ReportFormat = "JSON"
-	}
-
 	// Load profiles
 	profiles, _ := loadAllProfiles()
 
@@ -549,7 +521,7 @@ func initialModel() model {
 	})
 
 	return model{
-		menuItems: menuItems,
+		menuItems:           menuItems,
 		selectedIndex:       1,
 		profileStatus:       profileStatus,
 		currentScreen:       mainMenuScreen,
@@ -557,46 +529,50 @@ func initialModel() model {
 		figmaToken:          cfg.FigmaToken,
 		userID:              cfg.UserID,
 		teamID:              cfg.TeamID,
-		reportFormat:        cfg.ReportFormat,
-		formatOptions:       []string{"JSON", "Markdown", "TXT", "HTML"},
-		formatIndex:         0,
 		textInput:           ti,
 		editingIndex:        -1,
 		userHandle:          cfg.UserHandle,
 		userEmail:           cfg.UserEmail,
 		fetchingUser:        false,
 		userFetchError:      "",
-		profiles:            profiles,
-		activeProfile:       activeProfile,
-		wizardStep:          wizardTeamID,
-		wizardSelectedProj:  make(map[string]bool),
-		wizardSelectedFiles: make(map[string]bool),
-		loadingState:        notLoading,
+		profiles:           profiles,
+		activeProfile:      activeProfile,
+		wizardStep:         wizardTeamID,
+		wizardSelectedProj: make(map[string]bool),
+		loadingState:       notLoading,
 		listCursor:          0,
 		listOffset:          0,
 		showDeleteConfirm:   false,
 		deleteProfileName:   "",
-		reportTimeOptions:   []string{"Last Month", "This Month to Date", "Last 4 Weeks", "Last 30 Days", "Custom Date Range"},
+		reportTimeOptions:   []string{"Last Month", "This Month to Date", "Last 4 Weeks", "Last 30 Days"},
 		reportTimeIndex:     0,
+		reportProfileIndex:  0,
 		generatingReport:    false,
 		reportError:         "",
+		spinnerFrame:        0,
+		spinnerChars:        []string{"⬖", "⬗", "⬘", "⬙"},
 	}
 }
 
 func (m model) saveCurrentConfig() {
 	cfg := config{
-		FigmaToken:   m.figmaToken,
-		UserID:       m.userID,
-		TeamID:       m.teamID,
-		ReportFormat: m.reportFormat,
-		UserHandle:   m.userHandle,
-		UserEmail:    m.userEmail,
+		FigmaToken: m.figmaToken,
+		UserID:     m.userID,
+		TeamID:     m.teamID,
+		UserHandle: m.userHandle,
+		UserEmail:  m.userEmail,
 	}
 	saveConfig(cfg)
 }
 
 func (m model) Init() tea.Cmd {
 	return nil
+}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
 }
 
 func fetchUserInfo(token string) tea.Cmd {
@@ -698,109 +674,6 @@ func fetchProjects(token, teamID string) tea.Cmd {
 	}
 }
 
-func fetchFiles(token, projectID string) tea.Cmd {
-	return func() tea.Msg {
-		if token == "" {
-			return filesErrMsg{err: "No Figma token set"}
-		}
-
-		if projectID == "" {
-			return filesErrMsg{err: "No project ID provided"}
-		}
-
-		client := &http.Client{}
-		url := fmt.Sprintf("https://api.figma.com/v1/projects/%s/files", projectID)
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return filesErrMsg{err: err.Error()}
-		}
-
-		req.Header.Set("X-Figma-Token", token)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			return filesErrMsg{err: err.Error()}
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return filesErrMsg{err: fmt.Sprintf("API error: %s", string(body))}
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return filesErrMsg{err: err.Error()}
-		}
-
-		var result struct {
-			Files []FigmaFile `json:"files"`
-		}
-
-		if err := json.Unmarshal(body, &result); err != nil {
-			return filesErrMsg{err: err.Error()}
-		}
-
-		return filesCompleteMsg{
-			files: result.Files,
-			count: len(result.Files),
-		}
-	}
-}
-
-func fetchAllFiles(token string, projectIDs []string, projects map[string]FigmaProject) tea.Cmd {
-	return func() tea.Msg {
-		var allFiles []FigmaFile
-
-		for _, projectID := range projectIDs {
-			client := &http.Client{}
-			url := fmt.Sprintf("https://api.figma.com/v1/projects/%s/files", projectID)
-			req, err := http.NewRequest("GET", url, nil)
-			if err != nil {
-				continue
-			}
-
-			req.Header.Set("X-Figma-Token", token)
-
-			resp, err := client.Do(req)
-			if err != nil {
-				continue
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				resp.Body.Close()
-				continue
-			}
-
-			body, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				continue
-			}
-
-			var result struct {
-				Files []FigmaFile `json:"files"`
-			}
-
-			if err := json.Unmarshal(body, &result); err != nil {
-				continue
-			}
-
-			// Tag each file with its project ID
-			for i := range result.Files {
-				result.Files[i].ProjectID = projectID
-			}
-
-			allFiles = append(allFiles, result.Files...)
-		}
-
-		return filesCompleteMsg{
-			files: allFiles,
-			count: len(allFiles),
-		}
-	}
-}
-
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
@@ -833,79 +706,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loadingError = msg.err
 		return m, nil
 
-	case filesCompleteMsg:
-		m.wizardFiles = msg.files
-		m.loadingState = notLoading
-		m.loadingError = ""
-		m.loadingProgress = fmt.Sprintf("Found %d files", msg.count)
-		m.listCursor = 0
-
-		// Build grouped file list
-		m.wizardFileList = []FileListItem{}
-		projectFilesMap := make(map[string][]FigmaFile)
-
-		// Group files by project
-		for _, file := range msg.files {
-			projectFilesMap[file.ProjectID] = append(projectFilesMap[file.ProjectID], file)
-		}
-
-		// Build flat list with headers
-		for _, project := range m.wizardProjects {
-			if !m.wizardSelectedProj[project.ID] {
-				continue
-			}
-
-			files := projectFilesMap[project.ID]
-			if len(files) == 0 {
-				continue
-			}
-
-			// Add project header
-			m.wizardFileList = append(m.wizardFileList, FileListItem{
-				IsHeader:    true,
-				ProjectID:   project.ID,
-				ProjectName: project.Name,
-			})
-
-			// Add files
-			for _, file := range files {
-				m.wizardFileList = append(m.wizardFileList, FileListItem{
-					IsHeader:    false,
-					ProjectID:   project.ID,
-					ProjectName: project.Name,
-					File:        file,
-				})
-			}
-		}
-
-		// Set cursor to first file (skip headers) and reset offset
-		m.listOffset = 0
-		for i, item := range m.wizardFileList {
-			if !item.IsHeader {
-				m.listCursor = i
-				break
-			}
-		}
-
-		return m, nil
-
-	case filesErrMsg:
-		m.loadingState = notLoading
-		m.loadingError = msg.err
-		return m, nil
-
 	case reportGeneratedMsg:
 		m.generatingReport = false
 		m.activityReport = msg.report
 		m.reportContent = msg.content
 		m.reportError = ""
 		m.currentScreen = reportViewScreen
-		return m, nil
+
+		// Restore profile status
+		if m.activeProfile != nil {
+			m.profileStatus = "⬥ Profile: " + m.activeProfile.Name
+		}
+		m.reportingProfile = nil
+
+		// Auto-export report
+		profileName := "default"
+		if m.activeProfile != nil {
+			profileName = m.activeProfile.Name
+		}
+		return m, exportReport(msg.content, profileName)
 
 	case reportErrMsg:
 		m.generatingReport = false
 		m.reportError = msg.err
 		m.currentScreen = reportViewScreen
+
+		// Restore profile status
+		if m.activeProfile != nil {
+			m.profileStatus = "⬥ Profile: " + m.activeProfile.Name
+		}
+		m.reportingProfile = nil
 		return m, nil
 
 	case reportExportedMsg:
@@ -918,34 +748,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.exportError = msg.err
 		return m, nil
 
-	case tea.KeyMsg:
-		// Handle format selection screen
-		if m.currentScreen == formatSelectionScreen {
-			switch msg.String() {
-			case "ctrl+c":
-				return m, tea.Quit
-			case "esc":
-				// Cancel and go back to setup screen
-				m.currentScreen = setupScreen
-				return m, nil
-			case "up", "k":
-				if m.formatIndex > 0 {
-					m.formatIndex--
-				}
-			case "down", "j":
-				if m.formatIndex < len(m.formatOptions)-1 {
-					m.formatIndex++
-				}
-			case "enter":
-				// Select format and go back to setup screen
-				m.reportFormat = m.formatOptions[m.formatIndex]
-				m.currentScreen = setupScreen
-				m.saveCurrentConfig()
-				return m, nil
+	case tickMsg:
+		// Update spinner if generating report
+		if m.generatingReport {
+			m.spinnerFrame = (m.spinnerFrame + 1) % len(m.spinnerChars)
+			// Update profile status with spinner
+			if m.reportingProfile != nil {
+				m.profileStatus = m.spinnerChars[m.spinnerFrame] + " Profile: " + m.reportingProfile.Name
 			}
-			return m, nil
+			return m, tickCmd()
 		}
+		return m, nil
 
+	case tea.KeyMsg:
 		// Handle report config screen
 		if m.currentScreen == reportConfigScreen {
 			switch msg.String() {
@@ -956,17 +771,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentScreen = mainMenuScreen
 				m.selectedIndex = 1
 				return m, nil
+			case "left", "h":
+				// Navigate profiles
+				if len(m.profiles) > 0 && m.reportProfileIndex > 0 {
+					m.reportProfileIndex--
+				}
+			case "right", "l":
+				// Navigate profiles
+				if len(m.profiles) > 0 && m.reportProfileIndex < len(m.profiles)-1 {
+					m.reportProfileIndex++
+				}
 			case "up", "k":
+				// Navigate time options
 				if m.reportTimeIndex > 0 {
 					m.reportTimeIndex--
 				}
 			case "down", "j":
+				// Navigate time options
 				if m.reportTimeIndex < len(m.reportTimeOptions)-1 {
 					m.reportTimeIndex++
 				}
 			case "enter":
+				// Validate profile selected
+				if len(m.profiles) == 0 {
+					m.reportError = "No profiles available. Please create a profile first."
+					return m, nil
+				}
+
 				// Generate report based on selected time mode
-				// Map index to time mode
 				var selectedMode timeMode
 				switch m.reportTimeIndex {
 				case 0:
@@ -977,21 +809,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					selectedMode = timeModeLast4Weeks
 				case 3:
 					selectedMode = timeModeLast30Days
-				case 4:
-					selectedMode = timeModeCustom
 				}
 
 				m.reportConfig = ReportConfig{
 					TimeMode: selectedMode,
 				}
 
-				// TODO: If active profile is set, use its files
-				// For now, use team ID from config
+				// Use the selected profile
+				selectedProfile := &m.profiles[m.reportProfileIndex]
 
 				// Start report generation
 				m.generatingReport = true
+				m.reportingProfile = selectedProfile
 				m.currentScreen = reportGeneratingScreen
-				return m, generateReport(m.figmaToken, m.userID, m.teamID, m.reportConfig, m.activeProfile)
+				m.spinnerFrame = 0
+				// Start both the report generation and the spinner
+				return m, tea.Batch(
+					generateReport(m.figmaToken, m.userID, m.userHandle, m.teamID, m.reportConfig, selectedProfile),
+					tickCmd(),
+				)
 			}
 			return m, nil
 		}
@@ -1010,19 +846,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.reportError = ""
 				m.exportSuccess = ""
 				m.exportError = ""
-				return m, nil
-			case "e", "E":
-				// Export report if content is ready
-				if m.reportContent != "" && !m.generatingReport {
-					profileName := "default"
-					if m.activeProfile != nil {
-						profileName = m.activeProfile.Name
-					}
-					// Clear previous export messages
-					m.exportSuccess = ""
-					m.exportError = ""
-					return m, exportReport(m.reportContent, profileName)
+				// Restore profile status
+				if m.activeProfile != nil {
+					m.profileStatus = "⬥ Profile: " + m.activeProfile.Name
 				}
+				m.reportingProfile = nil
+				return m, nil
 			}
 			return m, nil
 		}
@@ -1036,6 +865,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Back to manage profiles
 				m.currentScreen = manageProfilesScreen
 				m.previewProfile = nil
+				return m, nil
+			case "e", "E":
+				// Enter edit mode with current profile
+				if m.previewProfile != nil {
+					m.wizardEditMode = true
+					m.wizardStep = wizardTeamID
+					m.wizardTeamID = m.previewProfile.TeamID
+					m.wizardProfileName = m.previewProfile.Name
+					// Pre-select current projects
+					m.wizardSelectedProj = make(map[string]bool)
+					for _, proj := range m.previewProfile.SelectedProjects {
+						m.wizardSelectedProj[proj.ID] = true
+					}
+					m.wizardProjects = nil
+					m.loadingState = notLoading
+					m.loadingError = ""
+					m.listCursor = 0
+					m.listOffset = 0
+					m.currentScreen = profileWizardScreen
+				}
+				return m, nil
+			case "d", "D":
+				// Delete profile
+				if m.previewProfile != nil {
+					m.showDeleteConfirm = true
+					m.deleteProfileName = m.previewProfile.Name
+					m.currentScreen = manageProfilesScreen
+					m.previewProfile = nil
+				}
 				return m, nil
 			}
 			return m, nil
@@ -1065,43 +923,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 
-					// Check if profile name already exists
-					for _, p := range m.profiles {
-						if p.Name == profileName {
-							m.loadingError = "Profile name already exists"
-							return m, nil
+					// Check if profile name already exists (skip if in edit mode with same name)
+					if !m.wizardEditMode || (m.wizardEditMode && profileName != m.previewProfile.Name) {
+						for _, p := range m.profiles {
+							if p.Name == profileName {
+								m.loadingError = "Profile name already exists"
+								return m, nil
+							}
 						}
 					}
 
 					// Build selected projects list
-					var selectedProjects []string
+					var selectedProjects []ProfileProject
 					for _, project := range m.wizardProjects {
 						if m.wizardSelectedProj[project.ID] {
-							selectedProjects = append(selectedProjects, project.ID)
-						}
-					}
-
-					// Build selected files list
-					var selectedFiles []SelectedFile
-					for _, item := range m.wizardFileList {
-						if !item.IsHeader && m.wizardSelectedFiles[item.File.Key] {
-							selectedFiles = append(selectedFiles, SelectedFile{
-								FileID:      item.File.Key,
-								FileName:    item.File.Name,
-								ProjectID:   item.ProjectID,
-								ProjectName: item.ProjectName,
+							selectedProjects = append(selectedProjects, ProfileProject{
+								ID:   project.ID,
+								Name: project.Name,
 							})
 						}
 					}
 
-					// Create profile
-					profile := Profile{
-						Name:             profileName,
-						TeamID:           m.wizardTeamID,
-						SelectedProjects: selectedProjects,
-						SelectedFiles:    selectedFiles,
-						CreatedAt:        time.Now(),
-						IsDefault:        len(m.profiles) == 0, // First profile is default
+					var profile Profile
+					if m.wizardEditMode && m.previewProfile != nil {
+						// Update existing profile
+						// If name changed, delete old profile file
+						if profileName != m.previewProfile.Name {
+							deleteProfile(m.previewProfile.Name)
+						}
+
+						profile = Profile{
+							Name:             profileName,
+							TeamID:           m.wizardTeamID,
+							SelectedProjects: selectedProjects,
+							CreatedAt:        m.previewProfile.CreatedAt, // Preserve original creation time
+							IsDefault:        m.previewProfile.IsDefault, // Preserve default status
+						}
+					} else {
+						// Create new profile
+						profile = Profile{
+							Name:             profileName,
+							TeamID:           m.wizardTeamID,
+							SelectedProjects: selectedProjects,
+							CreatedAt:        time.Now(),
+							IsDefault:        len(m.profiles) == 0, // First profile is default
+						}
 					}
 
 					// Save profile
@@ -1114,11 +980,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					profiles, _ := loadAllProfiles()
 					m.profiles = profiles
 
-					// Set as active if it's the default
-					if profile.IsDefault {
+					// Update active profile if it was being edited
+					if m.wizardEditMode && m.activeProfile != nil && m.previewProfile != nil {
+						if m.activeProfile.Name == m.previewProfile.Name {
+							m.activeProfile = &profile
+							m.profileStatus = "⬥ Profile: " + profile.Name
+						}
+					} else if profile.IsDefault {
+						// Set as active if it's the default (new profile)
 						m.activeProfile = &profile
 						m.profileStatus = "⬥ Profile: " + profile.Name
 					}
+
+					// Reset wizard state
+					m.wizardEditMode = false
+					m.previewProfile = nil
 
 					// Return to manage profiles
 					m.currentScreen = manageProfilesScreen
@@ -1175,6 +1051,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Cancel wizard and go back to manage profiles
 				m.currentScreen = manageProfilesScreen
 				m.listCursor = 0
+				m.wizardEditMode = false
+				m.previewProfile = nil
 				return m, nil
 			case "up", "k":
 				// Handle project list navigation
@@ -1184,24 +1062,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Adjust offset for scrolling (fixed page size of 10)
 						if m.listCursor < m.listOffset {
 							m.listOffset = m.listCursor
-						}
-					}
-				}
-				// Handle file list navigation (skip headers)
-				if m.wizardStep == wizardFiles && len(m.wizardFileList) > 0 {
-					for {
-						if m.listCursor > 0 {
-							m.listCursor--
-							// Skip headers
-							if !m.wizardFileList[m.listCursor].IsHeader {
-								// Adjust offset for scrolling (fixed page size of 10)
-								if m.listCursor < m.listOffset {
-									m.listOffset = m.listCursor
-								}
-								break
-							}
-						} else {
-							break
 						}
 					}
 				}
@@ -1216,24 +1076,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				}
-				// Handle file list navigation (skip headers)
-				if m.wizardStep == wizardFiles && len(m.wizardFileList) > 0 {
-					for {
-						if m.listCursor < len(m.wizardFileList)-1 {
-							m.listCursor++
-							// Skip headers
-							if !m.wizardFileList[m.listCursor].IsHeader {
-								// Adjust offset for scrolling (fixed page size of 10)
-								if m.listCursor >= m.listOffset+10 {
-									m.listOffset = m.listCursor - 10 + 1
-								}
-								break
-							}
-						} else {
-							break
-						}
-					}
-				}
 			case " ":
 				// Toggle selection for projects
 				if m.wizardStep == wizardProjects && len(m.wizardProjects) > 0 && m.listCursor < len(m.wizardProjects) {
@@ -1244,23 +1086,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.wizardSelectedProj[project.ID] = true
 					}
 				}
-				// Toggle selection for files
-				if m.wizardStep == wizardFiles && len(m.wizardFileList) > 0 && m.listCursor < len(m.wizardFileList) {
-					item := m.wizardFileList[m.listCursor]
-					if !item.IsHeader {
-						fileKey := item.File.Key
-						if m.wizardSelectedFiles[fileKey] {
-							delete(m.wizardSelectedFiles, fileKey)
-						} else {
-							m.wizardSelectedFiles[fileKey] = true
-						}
-					}
-				}
 			case "enter":
 				if m.wizardStep == wizardTeamID && m.editingIndex == -1 {
 					// Start editing team ID
 					m.editingIndex = 0
 					m.textInput.SetValue(m.wizardTeamID)
+					// Adjust text input width to fit terminal
+					inputWidth := m.width - 8 // Account for padding and margins
+					if inputWidth > 80 {
+						inputWidth = 80
+					}
+					if inputWidth < 20 {
+						inputWidth = 20
+					}
+					m.textInput.Width = inputWidth
 					m.textInput.Focus()
 					return m, nil
 				} else if m.wizardStep == wizardProjects {
@@ -1272,29 +1111,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					// Collect selected project IDs
 					var selectedProjectIDs []string
-					projectsMap := make(map[string]FigmaProject)
 					for _, project := range m.wizardProjects {
 						if m.wizardSelectedProj[project.ID] {
 							selectedProjectIDs = append(selectedProjectIDs, project.ID)
-							projectsMap[project.ID] = project
 						}
 					}
 
-					// Move to files step and fetch files
-					m.wizardStep = wizardFiles
-					m.loadingState = loadingFiles
-					m.loadingError = ""
-					m.listCursor = 0
-					m.listOffset = 0
-					return m, fetchAllFiles(m.figmaToken, selectedProjectIDs, projectsMap)
-				} else if m.wizardStep == wizardFiles {
-					// Validate at least one file selected
-					if len(m.wizardSelectedFiles) == 0 {
-						m.loadingError = "Please select at least one file"
-						return m, nil
-					}
-
-					// Move to save name step
+					// Move directly to save name step
 					m.wizardStep = wizardSaveName
 					m.loadingError = ""
 					m.editingIndex = -1
@@ -1303,6 +1126,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Start editing profile name
 					m.editingIndex = 0
 					m.textInput.SetValue(m.wizardProfileName)
+					// Adjust text input width to fit terminal
+					inputWidth := m.width - 8 // Account for padding and margins
+					if inputWidth > 80 {
+						inputWidth = 80
+					}
+					if inputWidth < 20 {
+						inputWidth = 20
+					}
+					m.textInput.Width = inputWidth
 					m.textInput.Focus()
 					return m, nil
 				}
@@ -1409,8 +1241,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.wizardStep = wizardTeamID
 					m.wizardTeamID = m.teamID
 					m.wizardSelectedProj = make(map[string]bool)
-					m.wizardSelectedFiles = make(map[string]bool)
 					m.wizardProfileName = ""
+					m.wizardEditMode = false
 					m.loadingState = notLoading
 					m.loadingError = ""
 					m.loadingProgress = ""
@@ -1486,6 +1318,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case 0: // Set Figma Token
 					m.editingIndex = 0
 					m.textInput.SetValue(m.figmaToken)
+					// Adjust text input width to fit terminal
+					inputWidth := m.width - 8 // Account for padding and margins
+					if inputWidth > 80 {
+						inputWidth = 80
+					}
+					if inputWidth < 20 {
+						inputWidth = 20
+					}
+					m.textInput.Width = inputWidth
 					m.textInput.Focus()
 				case 1: // Set User ID - Gather user info from API
 					m.fetchingUser = true
@@ -1494,17 +1335,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case 2: // Set Team ID
 					m.editingIndex = 2
 					m.textInput.SetValue(m.teamID)
-					m.textInput.Focus()
-				case 3: // Report format - show selection screen
-					// Set initial selection to current format
-					for i, f := range m.formatOptions {
-						if f == m.reportFormat {
-							m.formatIndex = i
-							break
-						}
+					// Adjust text input width to fit terminal
+					inputWidth := m.width - 8 // Account for padding and margins
+					if inputWidth > 80 {
+						inputWidth = 80
 					}
-					m.currentScreen = formatSelectionScreen
-				case 4: // Back
+					if inputWidth < 20 {
+						inputWidth = 20
+					}
+					m.textInput.Width = inputWidth
+					m.textInput.Focus()
+				case 3: // Back
 					m.currentScreen = mainMenuScreen
 					m.selectedIndex = 1
 				}
@@ -1544,6 +1385,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if selectedTitle == "Generate Activity Report" {
 					m.currentScreen = reportConfigScreen
 					m.reportTimeIndex = 0
+					// Set profile index to active profile or default to 0
+					m.reportProfileIndex = 0
+					if m.activeProfile != nil {
+						for i, profile := range m.profiles {
+							if profile.Name == m.activeProfile.Name {
+								m.reportProfileIndex = i
+								break
+							}
+						}
+					}
 				} else if selectedTitle == "Setup" {
 					m.currentScreen = setupScreen
 					m.setupIndex = 0
@@ -1596,8 +1447,6 @@ func (m model) View() string {
 	switch m.currentScreen {
 	case setupScreen:
 		return m.viewSetupScreen()
-	case formatSelectionScreen:
-		return m.viewFormatSelection()
 	case manageProfilesScreen:
 		return m.viewManageProfiles()
 	case profileWizardScreen:
@@ -1789,7 +1638,6 @@ func (m model) viewSetupScreen() string {
 		{"Set Figma Token", m.figmaToken},
 		{"Set User ID", userIDValue},
 		{"Set Team ID", m.teamID},
-		{"Report format", m.reportFormat},
 		{"← Back", "Back to main screen"},
 	}
 
@@ -1818,7 +1666,7 @@ func (m model) viewSetupScreen() string {
 
 	for i, item := range setupItems {
 		// Add empty line before Back option
-		if i == 4 {
+		if i == 3 {
 			menuStrings = append(menuStrings, "")
 		}
 
@@ -1962,108 +1810,6 @@ func (m model) viewSetupScreen() string {
 		Render(strings.Join(sections, "\n"))
 }
 
-func (m model) viewFormatSelection() string {
-	// Define colors
-	bgColor := lipgloss.Color("#020107")
-	whiteColor := lipgloss.Color("#FFFFFF")
-	defaultTextColor := lipgloss.Color("#C5C5C5")
-	cyanColor := lipgloss.Color("#00c7ff")
-	dimWhiteColor := lipgloss.Color("rgba(255,255,255,0.4)")
-	statusBgColor := lipgloss.Color("rgba(0,0,0,0.27)")
-
-	// Gradient colors for header and divider
-	gradientColors := []lipgloss.Color{
-		lipgloss.Color("#4fc06b"), // green
-		lipgloss.Color("#4aa9fb"), // blue
-		lipgloss.Color("#7b48f9"), // purple
-		lipgloss.Color("#ed7139"), // orange
-		lipgloss.Color("#ea4536"), // red
-	}
-
-	// Create 3-line gradient header
-	topGradientLine := createGradientBar(m.width, gradientColors)
-	bottomGradientLine := createGradientBar(m.width, gradientColors)
-	titleText := "▨ FIGMA BEACON"
-	statusText := m.profileStatus
-	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
-
-	// Build format selection list
-	var menuStrings []string
-	menuStrings = append(menuStrings, "")
-	menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("  Select Report Format:"))
-	menuStrings = append(menuStrings, "")
-
-	for i, format := range m.formatOptions {
-		var formatColor lipgloss.Color
-		var isBold bool
-		var prefix string
-
-		if i == m.formatIndex {
-			formatColor = whiteColor
-			isBold = true
-			prefix = "  → "
-		} else {
-			formatColor = defaultTextColor
-			isBold = false
-			prefix = "    "
-		}
-
-		formatStyle := lipgloss.NewStyle().
-			Foreground(formatColor).
-			Bold(isBold)
-
-		menuStrings = append(menuStrings, formatStyle.Render(prefix+format))
-	}
-
-	menuStrings = append(menuStrings, "")
-
-	menuSection := lipgloss.NewStyle().
-		Padding(0, 1).
-		Background(bgColor).
-		Render(strings.Join(menuStrings, "\n"))
-
-	// Create gradient divider
-	divider := createGradientDivider(m.width, gradientColors)
-
-	// Footer
-	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
-	escDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("cancel")
-	enterStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("enter")
-	enterDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("select")
-
-	leftShortcuts := lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc, "    ", enterStyle, " ", enterDesc)
-
-	dots := ""
-	for _, color := range gradientColors {
-		dots += lipgloss.NewStyle().Foreground(color).Render("⬤")
-	}
-
-	spacing := m.width - lipgloss.Width(leftShortcuts) - lipgloss.Width(dots) - 4
-	if spacing < 0 {
-		spacing = 0
-	}
-
-	footer := lipgloss.NewStyle().
-		Background(bgColor).
-		Padding(0, 1).
-		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
-
-	// Combine all sections
-	var sections []string
-	sections = append(sections, topGradientLine)
-	sections = append(sections, middleGradientLine)
-	sections = append(sections, bottomGradientLine)
-	sections = append(sections, menuSection)
-	sections = append(sections, divider)
-	sections = append(sections, footer)
-
-	return lipgloss.NewStyle().
-		Background(bgColor).
-		Height(m.height).
-		Width(m.width).
-		Render(strings.Join(sections, "\n"))
-}
-
 func (m model) viewManageProfiles() string {
 	// Define colors
 	bgColor := lipgloss.Color("#020107")
@@ -2160,7 +1906,7 @@ func (m model) viewManageProfiles() string {
 			// Show profile details if selected
 			if m.listCursor == i+1 {
 				detailStyle := lipgloss.NewStyle().Foreground(dimWhiteColor)
-				menuStrings = append(menuStrings, detailStyle.Render(fmt.Sprintf("      Projects: %d, Files: %d", len(profile.SelectedProjects), len(profile.SelectedFiles))))
+				menuStrings = append(menuStrings, detailStyle.Render(fmt.Sprintf("      Projects: %d", len(profile.SelectedProjects))))
 			}
 		}
 	}
@@ -2328,7 +2074,11 @@ func (m model) viewProfileWizard() string {
 	// Build wizard screen based on current step
 	var menuStrings []string
 	menuStrings = append(menuStrings, "")
-	menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("  Create Profile"))
+	wizardTitle := "  Create Profile"
+	if m.wizardEditMode {
+		wizardTitle = "  Edit Profile"
+	}
+	menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render(wizardTitle))
 	menuStrings = append(menuStrings, "")
 
 	// Step indicators with chevrons
@@ -2362,27 +2112,14 @@ func (m model) viewProfileWizard() string {
 	stepParts = append(stepParts, step2Style.Render(step2Indicator+" Projects"))
 	stepParts = append(stepParts, chevronStyle.Render(" ❯ "))
 
-	// Step 3: Files
+	// Step 3: Save
 	step3Style := lipgloss.NewStyle().Foreground(dimWhiteColor)
 	step3Indicator := "○"
-	if m.wizardStep == wizardFiles {
+	if m.wizardStep == wizardSaveName {
 		step3Indicator = "●"
 		step3Style = lipgloss.NewStyle().Foreground(whiteColor).Bold(true)
-	} else if m.wizardStep > wizardFiles {
-		step3Indicator = "✓"
-		step3Style = lipgloss.NewStyle().Foreground(greenColor)
 	}
-	stepParts = append(stepParts, step3Style.Render(step3Indicator+" Files"))
-	stepParts = append(stepParts, chevronStyle.Render(" ❯ "))
-
-	// Step 4: Save
-	step4Style := lipgloss.NewStyle().Foreground(dimWhiteColor)
-	step4Indicator := "○"
-	if m.wizardStep == wizardSaveName {
-		step4Indicator = "●"
-		step4Style = lipgloss.NewStyle().Foreground(whiteColor).Bold(true)
-	}
-	stepParts = append(stepParts, step4Style.Render(step4Indicator+" Save"))
+	stepParts = append(stepParts, step3Style.Render(step3Indicator+" Save"))
 
 	stepsLine := "  " + strings.Join(stepParts, "")
 	menuStrings = append(menuStrings, stepsLine)
@@ -2477,78 +2214,6 @@ func (m model) viewProfileWizard() string {
 			}
 		}
 
-	case wizardFiles:
-		if m.loadingState == loadingFiles {
-			menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(cyanColor).Render("  Loading files..."))
-			if m.loadingProgress != "" {
-				menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("  "+m.loadingProgress))
-			}
-		} else if m.loadingError != "" {
-			menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(lipgloss.Color("#ea4536")).Render("  Error: "+m.loadingError))
-		} else if len(m.wizardFileList) == 0 {
-			menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("  No files found"))
-		} else {
-			// Show file list with multi-select (grouped by project) and pagination
-			selectedCount := len(m.wizardSelectedFiles)
-			headerText := fmt.Sprintf("  Select files (%d selected):", selectedCount)
-			menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(defaultTextColor).Render(headerText))
-			menuStrings = append(menuStrings, "")
-
-			// Fixed page size of 10 items
-			visibleLines := 10
-
-			// Calculate pagination
-			totalItems := len(m.wizardFileList)
-			startIdx := m.listOffset
-			endIdx := startIdx + visibleLines
-			if endIdx > totalItems {
-				endIdx = totalItems
-			}
-
-			// Render visible grouped file list
-			for i := startIdx; i < endIdx; i++ {
-				item := m.wizardFileList[i]
-				if item.IsHeader {
-					// Render project header
-					headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4aa9fb")) // blue
-					line := "  ─── " + item.ProjectName + " ───"
-					menuStrings = append(menuStrings, headerStyle.Render(line))
-				} else {
-					// Render file
-					var marker string
-					var itemStyle lipgloss.Style
-
-					// Check if selected
-					isSelected := m.wizardSelectedFiles[item.File.Key]
-
-					// Determine marker and style
-					if isSelected {
-						marker = "➤ "
-						itemStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#4fc06b")) // green
-					} else {
-						marker = "  "
-						itemStyle = lipgloss.NewStyle().Foreground(defaultTextColor)
-					}
-
-					// Highlight cursor position
-					if i == m.listCursor {
-						itemStyle = itemStyle.Bold(true).Foreground(whiteColor)
-					}
-
-					line := "    " + marker + item.File.Name
-					menuStrings = append(menuStrings, itemStyle.Render(line))
-				}
-			}
-
-			menuStrings = append(menuStrings, "")
-
-			// Show pagination indicator if needed
-			if totalItems > visibleLines {
-				pageInfo := fmt.Sprintf("  [%d-%d of %d]", startIdx+1, endIdx, totalItems)
-				menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render(pageInfo))
-			}
-		}
-
 	case wizardSaveName:
 		menuStrings = append(menuStrings, lipgloss.NewStyle().Foreground(defaultTextColor).Render("  Profile name:"))
 		menuStrings = append(menuStrings, "")
@@ -2594,7 +2259,7 @@ func (m model) viewProfileWizard() string {
 	escDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("cancel")
 	enterStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("enter")
 
-	if m.wizardStep == wizardProjects || m.wizardStep == wizardFiles {
+	if m.wizardStep == wizardProjects  {
 		// Show space and enter shortcuts for list screens
 		spaceStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("space")
 		spaceDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("toggle")
@@ -2728,54 +2393,28 @@ func (m model) viewProfilePreview() string {
 	// Team ID
 	labelStyle := lipgloss.NewStyle().Foreground(dimWhiteColor)
 	valueStyle := lipgloss.NewStyle().Foreground(defaultTextColor)
-	dimStyle := lipgloss.NewStyle().Foreground(dimWhiteColor)
 	contentStrings = append(contentStrings, labelStyle.Render("  Team ID: ")+valueStyle.Render(m.previewProfile.TeamID))
 	contentStrings = append(contentStrings, "")
 
-	// Group files by project to show project names
-	projectFiles := make(map[string][]SelectedFile)
-	projectNames := make(map[string]string)
+	// Display projects list
+	contentStrings = append(contentStrings, labelStyle.Render("  Projects:"))
+	darkGreyColor := lipgloss.Color("#666666")
+	idStyle := lipgloss.NewStyle().Foreground(darkGreyColor)
 
-	for _, file := range m.previewProfile.SelectedFiles {
-		projectFiles[file.ProjectID] = append(projectFiles[file.ProjectID], file)
-		projectNames[file.ProjectID] = file.ProjectName
-	}
-
-	// Display tree structure
-	projectCount := len(m.previewProfile.SelectedProjects)
-	for i, projectID := range m.previewProfile.SelectedProjects {
-		projectName := projectNames[projectID]
-		if projectName == "" {
-			projectName = projectID
-		}
-
+	for i, project := range m.previewProfile.SelectedProjects {
 		// Determine if this is the last project
-		isLastProject := (i == projectCount-1)
+		isLastProject := (i == len(m.previewProfile.SelectedProjects)-1)
 		var projectPrefix string
-		var filePrefix string
 
 		if isLastProject {
 			projectPrefix = "  └╼ "
-			filePrefix = "      "
 		} else {
 			projectPrefix = "  ├╼ "
-			filePrefix = "  │   "
 		}
 
-		// Display project
-		contentStrings = append(contentStrings, valueStyle.Render(projectPrefix+projectName))
-
-		// Display files under this project
-		files := projectFiles[projectID]
-		fileCount := len(files)
-		for j, file := range files {
-			isLastFile := (j == fileCount-1)
-			if isLastFile {
-				contentStrings = append(contentStrings, dimStyle.Render(filePrefix+"└╼ "+file.FileName))
-			} else {
-				contentStrings = append(contentStrings, dimStyle.Render(filePrefix+"├╼ "+file.FileName))
-			}
-		}
+		// Display project name and ID: "├╼ {name} (id)"
+		projectLine := valueStyle.Render(projectPrefix+project.Name) + " " + idStyle.Render("("+project.ID+")")
+		contentStrings = append(contentStrings, projectLine)
 	}
 
 	contentStrings = append(contentStrings, "")
@@ -2792,8 +2431,15 @@ func (m model) viewProfilePreview() string {
 	// Footer
 	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
 	escDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("back")
+	editStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("e")
+	editDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("edit")
+	deleteStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("d")
+	deleteDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("delete")
 
-	leftShortcuts := lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc)
+	leftShortcuts := lipgloss.JoinHorizontal(lipgloss.Top,
+		escStyle, " ", escDesc, "    ",
+		editStyle, " ", editDesc, "    ",
+		deleteStyle, " ", deleteDesc)
 
 	dots := ""
 	for _, color := range gradientColors {
@@ -2852,11 +2498,6 @@ func resolveTimeWindow(config ReportConfig) TimeWindow {
 		// Last 30 days
 		start = now.AddDate(0, 0, -30)
 		end = now
-
-	case timeModeCustom:
-		// Use custom dates
-		start = config.CustomStartDate
-		end = config.CustomEndDate
 	}
 
 	return TimeWindow{
@@ -2865,37 +2506,22 @@ func resolveTimeWindow(config ReportConfig) TimeWindow {
 	}
 }
 
-func generateReport(token, userID, teamID string, config ReportConfig, profile *Profile) tea.Cmd {
+func generateReport(token, userID, userHandle, teamID string, config ReportConfig, profile *Profile) tea.Cmd {
 	return func() tea.Msg {
 		window := resolveTimeWindow(config)
 
-		// Determine scope: use profile files if available, otherwise fall back to team
-		var fileKeys []string
-		var projectID string
-
-		if profile != nil {
-			// Use files from the active profile
-			for _, selectedFile := range profile.SelectedFiles {
-				fileKeys = append(fileKeys, selectedFile.FileID)
-			}
+		// Ensure profile is selected
+		if profile == nil {
+			return reportErrMsg{err: "No profile selected. Please select a profile or create one in Manage Profiles."}
 		}
-
-		if len(fileKeys) == 0 && projectID == "" {
-			// Fall back to team - fetch all projects and files from team
-			// For now, return error if no profile is selected
-			if profile == nil {
-				return reportErrMsg{err: "No profile selected. Please select a profile or create one in Manage Profiles."}
-			}
-		}
-
-		// Fetch activity data for files
-		var files []FileActivity
 
 		client := &http.Client{Timeout: 30 * time.Second}
 
-		for _, fileKey := range fileKeys {
-			// Get file metadata
-			url := fmt.Sprintf("https://api.figma.com/v1/files/%s", fileKey)
+		// Fetch all files from profile's selected projects
+		var files []FileActivity
+		for _, project := range profile.SelectedProjects {
+			// Fetch files for this project
+			url := fmt.Sprintf("https://api.figma.com/v1/projects/%s/files", project.ID)
 			req, err := http.NewRequest("GET", url, nil)
 			if err != nil {
 				continue
@@ -2915,50 +2541,105 @@ func generateReport(token, userID, teamID string, config ReportConfig, profile *
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 
-			var fileData struct {
-				Name         string    `json:"name"`
-				LastModified time.Time `json:"lastModified"`
+			var projectFilesResp struct {
+				Files []struct {
+					Key  string `json:"key"`
+					Name string `json:"name"`
+				} `json:"files"`
 			}
-			json.Unmarshal(body, &fileData)
-
-			// Check if file was modified in the time window
-			myChanges := false
-			if fileData.LastModified.After(window.Start) && fileData.LastModified.Before(window.End) {
-				// File was modified in window - could be by anyone
-				// For now, mark as potential change
-				myChanges = true
+			if err := json.Unmarshal(body, &projectFilesResp); err != nil {
+				continue
 			}
 
-			// Find the file name and project name from profile
-			var fileName, projectName string
-			if profile != nil {
-				for _, sf := range profile.SelectedFiles {
-					if sf.FileID == fileKey {
-						fileName = sf.FileName
-						projectName = sf.ProjectName
-						break
+			// For each file, check if user modified it in time window
+			for _, fileInfo := range projectFilesResp.Files {
+				// Get file metadata
+				fileURL := fmt.Sprintf("https://api.figma.com/v1/files/%s", fileInfo.Key)
+				fileReq, err := http.NewRequest("GET", fileURL, nil)
+				if err != nil {
+					continue
+				}
+				fileReq.Header.Set("X-Figma-Token", token)
+
+				fileResp, err := client.Do(fileReq)
+				if err != nil {
+					continue
+				}
+
+				if fileResp.StatusCode != 200 {
+					fileResp.Body.Close()
+					continue
+				}
+
+				fileBody, _ := io.ReadAll(fileResp.Body)
+				fileResp.Body.Close()
+
+				var fileData struct {
+					Name         string    `json:"name"`
+					LastModified time.Time `json:"lastModified"`
+					Version      string    `json:"version"`
+				}
+				json.Unmarshal(fileBody, &fileData)
+
+				// Get file version history to determine created date
+				versionsURL := fmt.Sprintf("https://api.figma.com/v1/files/%s/versions", fileInfo.Key)
+				versionsReq, err := http.NewRequest("GET", versionsURL, nil)
+				if err == nil {
+					versionsReq.Header.Set("X-Figma-Token", token)
+					versionsResp, err := client.Do(versionsReq)
+					if err == nil && versionsResp.StatusCode == 200 {
+						versionsBody, _ := io.ReadAll(versionsResp.Body)
+						versionsResp.Body.Close()
+
+						var versionsData struct {
+							Versions []struct {
+								CreatedAt time.Time `json:"created_at"`
+							} `json:"versions"`
+						}
+						json.Unmarshal(versionsBody, &versionsData)
+
+						// Get earliest version (file creation date)
+						var createdAt time.Time
+						if len(versionsData.Versions) > 0 {
+							createdAt = versionsData.Versions[len(versionsData.Versions)-1].CreatedAt
+						}
+
+						// Check if file was created in the time window
+						createdInWindow := false
+						if !createdAt.IsZero() && createdAt.After(window.Start) && createdAt.Before(window.End) {
+							createdInWindow = true
+						}
+
+						// Check if file was modified in the time window
+						myChanges := false
+						if fileData.LastModified.After(window.Start) && fileData.LastModified.Before(window.End) {
+							myChanges = true
+						}
+
+						// Only include files with activity (created or modified in window)
+						if myChanges || createdInWindow {
+							files = append(files, FileActivity{
+								FileKey:         fileInfo.Key,
+								FileName:        fileData.Name,
+								ProjectName:     project.Name, // Use project name from profile
+								LastModified:    fileData.LastModified,
+								CreatedAt:       createdAt,
+								MyChanges:       myChanges,
+								CreatedInWindow: createdInWindow,
+								Versions:        []FigmaVersion{},
+								Comments:        []FigmaComment{},
+							})
+						}
 					}
 				}
 			}
-			if fileName == "" {
-				fileName = fileData.Name
-			}
-
-			files = append(files, FileActivity{
-				FileKey:      fileKey,
-				FileName:     fileName,
-				ProjectName:  projectName,
-				LastModified: fileData.LastModified,
-				MyChanges:    myChanges,
-				Versions:     []FigmaVersion{},
-				Comments:     []FigmaComment{},
-			})
 		}
 
 		// Build report
 		report := &ActivityReport{
 			TimeWindow:   window,
 			UserID:       userID,
+			UserHandle:   userHandle,
 			Files:        files,
 			TotalFiles:   len(files),
 			TotalChanges: 0,
@@ -2985,17 +2666,17 @@ func generateReport(token, userID, teamID string, config ReportConfig, profile *
 func formatReportMarkdown(report *ActivityReport) string {
 	var sb strings.Builder
 
-	sb.WriteString("# Figma Activity Report\n\n")
-	sb.WriteString(fmt.Sprintf("**Generated:** %s\n\n", report.GeneratedAt.Format("2006-01-02 15:04:05")))
-	sb.WriteString(fmt.Sprintf("**Time Period:** %s to %s\n\n",
+	sb.WriteString("# Status Report\n")
+	sb.WriteString(fmt.Sprintf("## From %s to %s\n",
 		report.TimeWindow.Start.Format("2006-01-02"),
 		report.TimeWindow.End.Format("2006-01-02")))
 
-	sb.WriteString(fmt.Sprintf("**Summary:**\n"))
-	sb.WriteString(fmt.Sprintf("- Total Files: %d\n", report.TotalFiles))
-	sb.WriteString(fmt.Sprintf("- Files with Changes: %d\n\n", report.TotalChanges))
-
-	sb.WriteString("## File Activity\n\n")
+	// Add user information if available
+	if report.UserHandle != "" {
+		sb.WriteString(fmt.Sprintf("User: %s\n\n", report.UserHandle))
+	} else {
+		sb.WriteString("\n")
+	}
 
 	if len(report.Files) == 0 {
 		sb.WriteString("No file activity found in the selected time period.\n")
@@ -3011,18 +2692,23 @@ func formatReportMarkdown(report *ActivityReport) string {
 		}
 
 		for projectName, files := range projectFiles {
-			sb.WriteString(fmt.Sprintf("### %s\n\n", projectName))
+			sb.WriteString(fmt.Sprintf("\n### %s\n\n", projectName))
 			for _, file := range files {
-				status := "No changes"
-				if file.MyChanges {
-					status = "Modified"
+				// Determine status
+				status := "Modified"
+				if file.CreatedInWindow {
+					status = "Created"
 				}
-				sb.WriteString(fmt.Sprintf("- **%s** - %s (Last modified: %s)\n",
+
+				// Create Figma file URL
+				figmaURL := fmt.Sprintf("https://www.figma.com/file/%s", file.FileKey)
+
+				// Format: - File name, link (Created/Modified)
+				sb.WriteString(fmt.Sprintf("- [%s](%s) (%s)\n",
 					file.FileName,
-					status,
-					file.LastModified.Format("2006-01-02 15:04")))
+					figmaURL,
+					status))
 			}
-			sb.WriteString("\n")
 		}
 	}
 
@@ -3031,14 +2717,8 @@ func formatReportMarkdown(report *ActivityReport) string {
 
 func exportReport(content string, profileName string) tea.Cmd {
 	return func() tea.Msg {
-		// Get home directory
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return reportExportErrMsg{err: "Failed to get home directory: " + err.Error()}
-		}
-
-		// Create reports directory
-		reportsDir := filepath.Join(homeDir, ".config", "figma-beacon", "reports")
+		// Create reports directory in current working directory
+		reportsDir := "reports"
 		if err := os.MkdirAll(reportsDir, 0755); err != nil {
 			return reportExportErrMsg{err: "Failed to create reports directory: " + err.Error()}
 		}
@@ -3141,16 +2821,7 @@ func (m model) viewReportView() string {
 	// Footer
 	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
 	escDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("back to menu")
-
-	var leftShortcuts string
-	if m.reportContent != "" && !m.generatingReport {
-		// Show export option when report is ready
-		eStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("e")
-		eDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("export")
-		leftShortcuts = lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc, "    ", eStyle, " ", eDesc)
-	} else {
-		leftShortcuts = lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc)
-	}
+	leftShortcuts := lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc)
 
 	dots := ""
 	for _, color := range gradientColors {
@@ -3213,10 +2884,55 @@ func (m model) viewReportConfig() string {
 	contentStrings = append(contentStrings, "")
 	contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("  Generate Activity Report"))
 	contentStrings = append(contentStrings, "")
-	contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("  Select time window:"))
+
+	// Display profile selection
+	contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("  Select profile:"))
+	contentStrings = append(contentStrings, "")
+
+	if len(m.profiles) == 0 {
+		contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("    No profiles available"))
+		contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("    Please create a profile first"))
+	} else {
+		// Show profiles horizontally with arrows
+		var profileParts []string
+
+		// Left arrow
+		if m.reportProfileIndex > 0 {
+			profileParts = append(profileParts, lipgloss.NewStyle().Foreground(cyanColor).Render(" ◀ "))
+		} else {
+			profileParts = append(profileParts, lipgloss.NewStyle().Foreground(dimWhiteColor).Render(" ◀ "))
+		}
+
+		// Current profile name
+		selectedProfile := m.profiles[m.reportProfileIndex]
+		profileName := selectedProfile.Name
+		if selectedProfile.IsDefault {
+			profileName += " (default)"
+		}
+		profileParts = append(profileParts, lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render(profileName))
+
+		// Right arrow
+		if m.reportProfileIndex < len(m.profiles)-1 {
+			profileParts = append(profileParts, lipgloss.NewStyle().Foreground(cyanColor).Render(" ▶"))
+		} else {
+			profileParts = append(profileParts, lipgloss.NewStyle().Foreground(dimWhiteColor).Render(" ▶"))
+		}
+
+		profileLine := "   " + strings.Join(profileParts, "")
+		contentStrings = append(contentStrings, profileLine)
+
+		// Show profile counter
+		counter := fmt.Sprintf("    %d / %d", m.reportProfileIndex+1, len(m.profiles))
+		contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render(counter))
+	}
+
+	contentStrings = append(contentStrings, "")
 	contentStrings = append(contentStrings, "")
 
 	// Display time window options
+	contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("  Select time window:"))
+	contentStrings = append(contentStrings, "")
+
 	for i, option := range m.reportTimeOptions {
 		var optionColor lipgloss.Color
 		var optionBold bool
@@ -3242,9 +2958,6 @@ func (m model) viewReportConfig() string {
 	contentStrings = append(contentStrings, "")
 	contentStrings = append(contentStrings, "")
 
-	// If custom date range is selected, show date input (future enhancement)
-	// For now, we'll just show the option
-
 	contentSection := lipgloss.NewStyle().
 		Padding(0, 1).
 		Background(bgColor).
@@ -3257,9 +2970,14 @@ func (m model) viewReportConfig() string {
 	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
 	escDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("back")
 	enterStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("enter")
-	enterDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("generate report")
+	enterDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("generate")
+	arrowsStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("←/→")
+	arrowsDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("profile")
 
-	leftShortcuts := lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc, "    ", enterStyle, " ", enterDesc)
+	leftShortcuts := lipgloss.JoinHorizontal(lipgloss.Top,
+		escStyle, " ", escDesc, "    ",
+		arrowsStyle, " ", arrowsDesc, "    ",
+		enterStyle, " ", enterDesc)
 
 	dots := ""
 	for _, color := range gradientColors {
