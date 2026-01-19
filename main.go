@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/glamour"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -25,6 +26,9 @@ const (
 	manageProfilesScreen
 	profileWizardScreen
 	profilePreviewScreen
+	reportConfigScreen
+	reportGeneratingScreen
+	reportViewScreen
 )
 
 type wizardStep int
@@ -79,6 +83,78 @@ type FileListItem struct {
 	File        FigmaFile
 }
 
+// Report generator data structures
+type timeMode string
+
+const (
+	timeModeLastMonth       timeMode = "last_month"
+	timeModeThisMonthToDate timeMode = "this_month_to_date"
+	timeModeLast4Weeks      timeMode = "last_4_weeks"
+	timeModeLast30Days      timeMode = "last_30_days"
+	timeModeCustom          timeMode = "custom"
+)
+
+type ReportConfig struct {
+	TimeMode        timeMode
+	CustomStartDate time.Time
+	CustomEndDate   time.Time
+	FileKeys        []string
+	ProjectID       string
+}
+
+type TimeWindow struct {
+	Start time.Time
+	End   time.Time
+}
+
+type FigmaFileMetadata struct {
+	Key          string    `json:"key"`
+	Name         string    `json:"name"`
+	LastModified time.Time `json:"lastModified"`
+	ThumbnailURL string    `json:"thumbnailUrl"`
+}
+
+type FigmaVersion struct {
+	ID          string    `json:"id"`
+	Created     time.Time `json:"created_at"`
+	Label       string    `json:"label"`
+	Description string    `json:"description"`
+	User        struct {
+		ID     string `json:"id"`
+		Handle string `json:"handle"`
+	} `json:"user"`
+}
+
+type FigmaComment struct {
+	ID        string    `json:"id"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
+	User      struct {
+		ID     string `json:"id"`
+		Handle string `json:"handle"`
+	} `json:"user"`
+}
+
+type FileActivity struct {
+	FileKey      string
+	FileName     string
+	ProjectName  string
+	Versions     []FigmaVersion
+	Comments     []FigmaComment
+	LastModified time.Time
+	MyChanges    bool // indicates if the user made changes in the time window
+}
+
+type ActivityReport struct {
+	TimeWindow   TimeWindow
+	UserID       string
+	UserHandle   string
+	Files        []FileActivity
+	TotalFiles   int
+	TotalChanges int
+	GeneratedAt  time.Time
+}
+
 type model struct {
 	menuItems       []menuItem
 	selectedIndex   int
@@ -118,8 +194,18 @@ type model struct {
 	listOffset          int
 	listCursor          int
 	// Delete confirmation
-	showDeleteConfirm   bool
-	deleteProfileName   string
+	showDeleteConfirm bool
+	deleteProfileName string
+	// Report generator fields
+	reportConfig      ReportConfig
+	reportTimeOptions []string
+	reportTimeIndex   int
+	generatingReport  bool
+	activityReport    *ActivityReport
+	reportError       string
+	reportContent     string
+	exportSuccess     string
+	exportError       string
 }
 
 type userInfoMsg struct {
@@ -157,6 +243,24 @@ type profileSavedMsg struct {
 
 type profilesLoadedMsg struct {
 	profiles []Profile
+}
+
+// Report generator message types
+type reportGeneratedMsg struct {
+	report  *ActivityReport
+	content string
+}
+
+type reportErrMsg struct {
+	err string
+}
+
+type reportExportedMsg struct {
+	filepath string
+}
+
+type reportExportErrMsg struct {
+	err string
 }
 
 type config struct {
@@ -472,6 +576,10 @@ func initialModel() model {
 		listOffset:          0,
 		showDeleteConfirm:   false,
 		deleteProfileName:   "",
+		reportTimeOptions:   []string{"Last Month", "This Month to Date", "Last 4 Weeks", "Last 30 Days", "Custom Date Range"},
+		reportTimeIndex:     0,
+		generatingReport:    false,
+		reportError:         "",
 	}
 }
 
@@ -786,6 +894,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loadingError = msg.err
 		return m, nil
 
+	case reportGeneratedMsg:
+		m.generatingReport = false
+		m.activityReport = msg.report
+		m.reportContent = msg.content
+		m.reportError = ""
+		m.currentScreen = reportViewScreen
+		return m, nil
+
+	case reportErrMsg:
+		m.generatingReport = false
+		m.reportError = msg.err
+		m.currentScreen = reportViewScreen
+		return m, nil
+
+	case reportExportedMsg:
+		m.exportSuccess = "Report saved to: " + msg.filepath
+		m.exportError = ""
+		return m, nil
+
+	case reportExportErrMsg:
+		m.exportSuccess = ""
+		m.exportError = msg.err
+		return m, nil
+
 	case tea.KeyMsg:
 		// Handle format selection screen
 		if m.currentScreen == formatSelectionScreen {
@@ -810,6 +942,87 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentScreen = setupScreen
 				m.saveCurrentConfig()
 				return m, nil
+			}
+			return m, nil
+		}
+
+		// Handle report config screen
+		if m.currentScreen == reportConfigScreen {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				// Back to main menu
+				m.currentScreen = mainMenuScreen
+				m.selectedIndex = 1
+				return m, nil
+			case "up", "k":
+				if m.reportTimeIndex > 0 {
+					m.reportTimeIndex--
+				}
+			case "down", "j":
+				if m.reportTimeIndex < len(m.reportTimeOptions)-1 {
+					m.reportTimeIndex++
+				}
+			case "enter":
+				// Generate report based on selected time mode
+				// Map index to time mode
+				var selectedMode timeMode
+				switch m.reportTimeIndex {
+				case 0:
+					selectedMode = timeModeLastMonth
+				case 1:
+					selectedMode = timeModeThisMonthToDate
+				case 2:
+					selectedMode = timeModeLast4Weeks
+				case 3:
+					selectedMode = timeModeLast30Days
+				case 4:
+					selectedMode = timeModeCustom
+				}
+
+				m.reportConfig = ReportConfig{
+					TimeMode: selectedMode,
+				}
+
+				// TODO: If active profile is set, use its files
+				// For now, use team ID from config
+
+				// Start report generation
+				m.generatingReport = true
+				m.currentScreen = reportGeneratingScreen
+				return m, generateReport(m.figmaToken, m.userID, m.teamID, m.reportConfig, m.activeProfile)
+			}
+			return m, nil
+		}
+
+		// Handle report view screen
+		if m.currentScreen == reportGeneratingScreen || m.currentScreen == reportViewScreen {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				// Back to main menu
+				m.currentScreen = mainMenuScreen
+				m.selectedIndex = 1
+				m.generatingReport = false
+				m.reportContent = ""
+				m.reportError = ""
+				m.exportSuccess = ""
+				m.exportError = ""
+				return m, nil
+			case "e", "E":
+				// Export report if content is ready
+				if m.reportContent != "" && !m.generatingReport {
+					profileName := "default"
+					if m.activeProfile != nil {
+						profileName = m.activeProfile.Name
+					}
+					// Clear previous export messages
+					m.exportSuccess = ""
+					m.exportError = ""
+					return m, exportReport(m.reportContent, profileName)
+				}
 			}
 			return m, nil
 		}
@@ -1301,63 +1514,68 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Handle main menu screen
-		switch msg.String() {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "esc":
-			// Back to home - reset to first menu item (skip empty line)
-			m.selectedIndex = 1
-		case "up", "k":
-			if m.selectedIndex > 0 {
-				m.selectedIndex--
-				// Skip empty items
-				if m.menuItems[m.selectedIndex].title == "" && m.selectedIndex > 0 {
-					m.selectedIndex--
-				}
-			}
-		case "down", "j":
-			if m.selectedIndex < len(m.menuItems)-1 {
-				m.selectedIndex++
-				// Skip empty items
-				if m.menuItems[m.selectedIndex].title == "" && m.selectedIndex < len(m.menuItems)-1 {
-					m.selectedIndex++
-				}
-			}
-		case "enter":
-			// Handle menu selection
-			selectedTitle := m.menuItems[m.selectedIndex].title
-
-			if selectedTitle == "Setup" {
-				m.currentScreen = setupScreen
-				m.setupIndex = 0
-			} else if selectedTitle == "Exit" {
+		if m.currentScreen == mainMenuScreen {
+			switch msg.String() {
+			case "ctrl+c", "q":
 				return m, tea.Quit
-			} else if selectedTitle == "Manage Profiles" {
-				m.currentScreen = manageProfilesScreen
-				m.listCursor = 0
-			} else if strings.HasPrefix(selectedTitle, "  - ") {
-				// Profile selected - extract profile name and set as active
-				profileName := strings.TrimPrefix(selectedTitle, "  - ")
-				profileName = strings.TrimSuffix(profileName, " (default)")
-
-				// Set as active profile
-				setDefaultProfile(profileName)
-				// Reload profiles
-				profiles, _ := loadAllProfiles()
-				m.profiles = profiles
-				for i := range m.profiles {
-					if m.profiles[i].IsDefault {
-						m.activeProfile = &m.profiles[i]
-						m.profileStatus = "⬥ Profile: " + m.activeProfile.Name
-						break
+			case "esc":
+				// Back to home - reset to first menu item (skip empty line)
+				m.selectedIndex = 1
+			case "up", "k":
+				if m.selectedIndex > 0 {
+					m.selectedIndex--
+					// Skip empty items
+					if m.menuItems[m.selectedIndex].title == "" && m.selectedIndex > 0 {
+						m.selectedIndex--
 					}
 				}
-				// Rebuild menu items
-				oldWidth := m.width
-				oldHeight := m.height
-				m = initialModel()
-				m.width = oldWidth
-				m.height = oldHeight
+			case "down", "j":
+				if m.selectedIndex < len(m.menuItems)-1 {
+					m.selectedIndex++
+					// Skip empty items
+					if m.menuItems[m.selectedIndex].title == "" && m.selectedIndex < len(m.menuItems)-1 {
+						m.selectedIndex++
+					}
+				}
+			case "enter":
+				// Handle menu selection
+				selectedTitle := m.menuItems[m.selectedIndex].title
+
+				if selectedTitle == "Generate Activity Report" {
+					m.currentScreen = reportConfigScreen
+					m.reportTimeIndex = 0
+				} else if selectedTitle == "Setup" {
+					m.currentScreen = setupScreen
+					m.setupIndex = 0
+				} else if selectedTitle == "Exit" {
+					return m, tea.Quit
+				} else if selectedTitle == "Manage Profiles" {
+					m.currentScreen = manageProfilesScreen
+					m.listCursor = 0
+				} else if strings.HasPrefix(selectedTitle, "  - ") {
+					// Profile selected - extract profile name and set as active
+					profileName := strings.TrimPrefix(selectedTitle, "  - ")
+					profileName = strings.TrimSuffix(profileName, " (default)")
+
+					// Set as active profile
+					setDefaultProfile(profileName)
+					// Reload profiles
+					profiles, _ := loadAllProfiles()
+					m.profiles = profiles
+					for i := range m.profiles {
+						if m.profiles[i].IsDefault {
+							m.activeProfile = &m.profiles[i]
+							m.profileStatus = "⬥ Profile: " + m.activeProfile.Name
+							break
+						}
+					}
+					// Rebuild menu items
+					oldWidth := m.width
+					oldHeight := m.height
+					m = initialModel()
+					m.width = oldWidth
+					m.height = oldHeight
+				}
 			}
 		}
 	case tea.WindowSizeMsg:
@@ -1386,6 +1604,10 @@ func (m model) View() string {
 		return m.viewProfileWizard()
 	case profilePreviewScreen:
 		return m.viewProfilePreview()
+	case reportConfigScreen:
+		return m.viewReportConfig()
+	case reportGeneratingScreen, reportViewScreen:
+		return m.viewReportView()
 	default:
 		return m.viewMainMenu()
 	}
@@ -2572,6 +2794,472 @@ func (m model) viewProfilePreview() string {
 	escDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("back")
 
 	leftShortcuts := lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc)
+
+	dots := ""
+	for _, color := range gradientColors {
+		dots += lipgloss.NewStyle().Foreground(color).Render("⬤")
+	}
+
+	spacing := m.width - lipgloss.Width(leftShortcuts) - lipgloss.Width(dots) - 4
+	if spacing < 0 {
+		spacing = 0
+	}
+
+	footer := lipgloss.NewStyle().
+		Background(bgColor).
+		Padding(0, 1).
+		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
+
+	// Combine all sections
+	var sections []string
+	sections = append(sections, topGradientLine)
+	sections = append(sections, middleGradientLine)
+	sections = append(sections, bottomGradientLine)
+	sections = append(sections, contentSection)
+	sections = append(sections, divider)
+	sections = append(sections, footer)
+
+	return lipgloss.NewStyle().
+		Background(bgColor).
+		Height(m.height).
+		Width(m.width).
+		Render(strings.Join(sections, "\n"))
+}
+
+func resolveTimeWindow(config ReportConfig) TimeWindow {
+	now := time.Now()
+	var start, end time.Time
+
+	switch config.TimeMode {
+	case timeModeLastMonth:
+		// Previous calendar month
+		firstOfThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		firstOfLastMonth := firstOfThisMonth.AddDate(0, -1, 0)
+		start = firstOfLastMonth
+		end = firstOfThisMonth.Add(-time.Second) // Last second of previous month
+
+	case timeModeThisMonthToDate:
+		// From first day of current month to now
+		start = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		end = now
+
+	case timeModeLast4Weeks:
+		// Last 28 days
+		start = now.AddDate(0, 0, -28)
+		end = now
+
+	case timeModeLast30Days:
+		// Last 30 days
+		start = now.AddDate(0, 0, -30)
+		end = now
+
+	case timeModeCustom:
+		// Use custom dates
+		start = config.CustomStartDate
+		end = config.CustomEndDate
+	}
+
+	return TimeWindow{
+		Start: start,
+		End:   end,
+	}
+}
+
+func generateReport(token, userID, teamID string, config ReportConfig, profile *Profile) tea.Cmd {
+	return func() tea.Msg {
+		window := resolveTimeWindow(config)
+
+		// Determine scope: use profile files if available, otherwise fall back to team
+		var fileKeys []string
+		var projectID string
+
+		if profile != nil {
+			// Use files from the active profile
+			for _, selectedFile := range profile.SelectedFiles {
+				fileKeys = append(fileKeys, selectedFile.FileID)
+			}
+		}
+
+		if len(fileKeys) == 0 && projectID == "" {
+			// Fall back to team - fetch all projects and files from team
+			// For now, return error if no profile is selected
+			if profile == nil {
+				return reportErrMsg{err: "No profile selected. Please select a profile or create one in Manage Profiles."}
+			}
+		}
+
+		// Fetch activity data for files
+		var files []FileActivity
+
+		client := &http.Client{Timeout: 30 * time.Second}
+
+		for _, fileKey := range fileKeys {
+			// Get file metadata
+			url := fmt.Sprintf("https://api.figma.com/v1/files/%s", fileKey)
+			req, err := http.NewRequest("GET", url, nil)
+			if err != nil {
+				continue
+			}
+			req.Header.Set("X-Figma-Token", token)
+
+			resp, err := client.Do(req)
+			if err != nil {
+				continue
+			}
+
+			if resp.StatusCode != 200 {
+				resp.Body.Close()
+				continue
+			}
+
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			var fileData struct {
+				Name         string    `json:"name"`
+				LastModified time.Time `json:"lastModified"`
+			}
+			json.Unmarshal(body, &fileData)
+
+			// Check if file was modified in the time window
+			myChanges := false
+			if fileData.LastModified.After(window.Start) && fileData.LastModified.Before(window.End) {
+				// File was modified in window - could be by anyone
+				// For now, mark as potential change
+				myChanges = true
+			}
+
+			// Find the file name and project name from profile
+			var fileName, projectName string
+			if profile != nil {
+				for _, sf := range profile.SelectedFiles {
+					if sf.FileID == fileKey {
+						fileName = sf.FileName
+						projectName = sf.ProjectName
+						break
+					}
+				}
+			}
+			if fileName == "" {
+				fileName = fileData.Name
+			}
+
+			files = append(files, FileActivity{
+				FileKey:      fileKey,
+				FileName:     fileName,
+				ProjectName:  projectName,
+				LastModified: fileData.LastModified,
+				MyChanges:    myChanges,
+				Versions:     []FigmaVersion{},
+				Comments:     []FigmaComment{},
+			})
+		}
+
+		// Build report
+		report := &ActivityReport{
+			TimeWindow:   window,
+			UserID:       userID,
+			Files:        files,
+			TotalFiles:   len(files),
+			TotalChanges: 0,
+			GeneratedAt:  time.Now(),
+		}
+
+		// Count total changes
+		for _, file := range files {
+			if file.MyChanges {
+				report.TotalChanges++
+			}
+		}
+
+		// Format report content
+		content := formatReportMarkdown(report)
+
+		return reportGeneratedMsg{
+			report:  report,
+			content: content,
+		}
+	}
+}
+
+func formatReportMarkdown(report *ActivityReport) string {
+	var sb strings.Builder
+
+	sb.WriteString("# Figma Activity Report\n\n")
+	sb.WriteString(fmt.Sprintf("**Generated:** %s\n\n", report.GeneratedAt.Format("2006-01-02 15:04:05")))
+	sb.WriteString(fmt.Sprintf("**Time Period:** %s to %s\n\n",
+		report.TimeWindow.Start.Format("2006-01-02"),
+		report.TimeWindow.End.Format("2006-01-02")))
+
+	sb.WriteString(fmt.Sprintf("**Summary:**\n"))
+	sb.WriteString(fmt.Sprintf("- Total Files: %d\n", report.TotalFiles))
+	sb.WriteString(fmt.Sprintf("- Files with Changes: %d\n\n", report.TotalChanges))
+
+	sb.WriteString("## File Activity\n\n")
+
+	if len(report.Files) == 0 {
+		sb.WriteString("No file activity found in the selected time period.\n")
+	} else {
+		// Group by project
+		projectFiles := make(map[string][]FileActivity)
+		for _, file := range report.Files {
+			projectName := file.ProjectName
+			if projectName == "" {
+				projectName = "Unknown Project"
+			}
+			projectFiles[projectName] = append(projectFiles[projectName], file)
+		}
+
+		for projectName, files := range projectFiles {
+			sb.WriteString(fmt.Sprintf("### %s\n\n", projectName))
+			for _, file := range files {
+				status := "No changes"
+				if file.MyChanges {
+					status = "Modified"
+				}
+				sb.WriteString(fmt.Sprintf("- **%s** - %s (Last modified: %s)\n",
+					file.FileName,
+					status,
+					file.LastModified.Format("2006-01-02 15:04")))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}
+
+func exportReport(content string, profileName string) tea.Cmd {
+	return func() tea.Msg {
+		// Get home directory
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return reportExportErrMsg{err: "Failed to get home directory: " + err.Error()}
+		}
+
+		// Create reports directory
+		reportsDir := filepath.Join(homeDir, ".config", "figma-beacon", "reports")
+		if err := os.MkdirAll(reportsDir, 0755); err != nil {
+			return reportExportErrMsg{err: "Failed to create reports directory: " + err.Error()}
+		}
+
+		// Generate filename with profile name and date
+		if profileName == "" {
+			profileName = "default"
+		}
+		timestamp := time.Now().Format("2006-01-02")
+		filename := fmt.Sprintf("%s-%s.md", profileName, timestamp)
+		filepath := filepath.Join(reportsDir, filename)
+
+		// Write content to file
+		if err := os.WriteFile(filepath, []byte(content), 0644); err != nil {
+			return reportExportErrMsg{err: "Failed to write report: " + err.Error()}
+		}
+
+		return reportExportedMsg{filepath: filepath}
+	}
+}
+
+func (m model) viewReportView() string {
+	// Define colors
+	bgColor := lipgloss.Color("#020107")
+	whiteColor := lipgloss.Color("#FFFFFF")
+	defaultTextColor := lipgloss.Color("#C5C5C5")
+	cyanColor := lipgloss.Color("#00c7ff")
+	dimWhiteColor := lipgloss.Color("rgba(255,255,255,0.4)")
+	statusBgColor := lipgloss.Color("rgba(0,0,0,0.27)")
+
+	// Gradient colors for header and divider
+	gradientColors := []lipgloss.Color{
+		lipgloss.Color("#4fc06b"), // green
+		lipgloss.Color("#4aa9fb"), // blue
+		lipgloss.Color("#7b48f9"), // purple
+		lipgloss.Color("#ed7139"), // orange
+		lipgloss.Color("#ea4536"), // red
+	}
+
+	// Create 3-line gradient header
+	topGradientLine := createGradientBar(m.width, gradientColors)
+	bottomGradientLine := createGradientBar(m.width, gradientColors)
+	titleText := "▨ FIGMA BEACON"
+	statusText := m.profileStatus
+	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
+
+	// Build report display
+	var contentStrings []string
+	contentStrings = append(contentStrings, "")
+
+	if m.generatingReport {
+		contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("  Generating Report..."))
+		contentStrings = append(contentStrings, "")
+		contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("  Please wait while we fetch your Figma activity data..."))
+	} else if m.reportError != "" {
+		contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(lipgloss.Color("#ea4536")).Bold(true).Render("  Error"))
+		contentStrings = append(contentStrings, "")
+		contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(defaultTextColor).Render("  "+m.reportError))
+	} else if m.reportContent != "" {
+		// Render markdown using glamour
+		r, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(m.width-4),
+		)
+
+		if err != nil {
+			contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(lipgloss.Color("#ea4536")).Render("  Failed to initialize markdown renderer"))
+		} else {
+			rendered, err := r.Render(m.reportContent)
+			if err != nil {
+				contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(lipgloss.Color("#ea4536")).Render("  Failed to render markdown"))
+			} else {
+				// Add the rendered markdown
+				contentStrings = append(contentStrings, rendered)
+			}
+		}
+
+		// Show export success/error messages
+		if m.exportSuccess != "" {
+			contentStrings = append(contentStrings, "")
+			contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(lipgloss.Color("#4fc06b")).Bold(true).Render("  ✓ Exported successfully!"))
+			contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("  "+m.exportSuccess))
+		} else if m.exportError != "" {
+			contentStrings = append(contentStrings, "")
+			contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(lipgloss.Color("#ea4536")).Bold(true).Render("  ✗ Export failed"))
+			contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(defaultTextColor).Render("  "+m.exportError))
+		}
+	}
+
+	contentStrings = append(contentStrings, "")
+
+	contentSection := lipgloss.NewStyle().
+		Padding(0, 1).
+		Background(bgColor).
+		Render(strings.Join(contentStrings, "\n"))
+
+	// Create gradient divider
+	divider := createGradientDivider(m.width, gradientColors)
+
+	// Footer
+	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
+	escDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("back to menu")
+
+	var leftShortcuts string
+	if m.reportContent != "" && !m.generatingReport {
+		// Show export option when report is ready
+		eStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("e")
+		eDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("export")
+		leftShortcuts = lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc, "    ", eStyle, " ", eDesc)
+	} else {
+		leftShortcuts = lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc)
+	}
+
+	dots := ""
+	for _, color := range gradientColors {
+		dots += lipgloss.NewStyle().Foreground(color).Render("⬤")
+	}
+
+	spacing := m.width - lipgloss.Width(leftShortcuts) - lipgloss.Width(dots) - 4
+	if spacing < 0 {
+		spacing = 0
+	}
+
+	footer := lipgloss.NewStyle().
+		Background(bgColor).
+		Padding(0, 1).
+		Render(lipgloss.JoinHorizontal(lipgloss.Top, leftShortcuts, strings.Repeat(" ", spacing), dots))
+
+	// Combine all sections
+	var sections []string
+	sections = append(sections, topGradientLine)
+	sections = append(sections, middleGradientLine)
+	sections = append(sections, bottomGradientLine)
+	sections = append(sections, contentSection)
+	sections = append(sections, divider)
+	sections = append(sections, footer)
+
+	return lipgloss.NewStyle().
+		Background(bgColor).
+		Height(m.height).
+		Width(m.width).
+		Render(strings.Join(sections, "\n"))
+}
+
+func (m model) viewReportConfig() string {
+	// Define colors
+	bgColor := lipgloss.Color("#020107")
+	whiteColor := lipgloss.Color("#FFFFFF")
+	defaultTextColor := lipgloss.Color("#C5C5C5")
+	cyanColor := lipgloss.Color("#00c7ff")
+	dimWhiteColor := lipgloss.Color("rgba(255,255,255,0.4)")
+	statusBgColor := lipgloss.Color("rgba(0,0,0,0.27)")
+
+	// Gradient colors for header and divider
+	gradientColors := []lipgloss.Color{
+		lipgloss.Color("#4fc06b"), // green
+		lipgloss.Color("#4aa9fb"), // blue
+		lipgloss.Color("#7b48f9"), // purple
+		lipgloss.Color("#ed7139"), // orange
+		lipgloss.Color("#ea4536"), // red
+	}
+
+	// Create 3-line gradient header
+	topGradientLine := createGradientBar(m.width, gradientColors)
+	bottomGradientLine := createGradientBar(m.width, gradientColors)
+	titleText := "▨ FIGMA BEACON"
+	statusText := m.profileStatus
+	middleGradientLine := createGradientBarWithText(m.width, gradientColors, titleText, statusText, whiteColor, statusBgColor)
+
+	// Build configuration screen
+	var contentStrings []string
+	contentStrings = append(contentStrings, "")
+	contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("  Generate Activity Report"))
+	contentStrings = append(contentStrings, "")
+	contentStrings = append(contentStrings, lipgloss.NewStyle().Foreground(dimWhiteColor).Render("  Select time window:"))
+	contentStrings = append(contentStrings, "")
+
+	// Display time window options
+	for i, option := range m.reportTimeOptions {
+		var optionColor lipgloss.Color
+		var optionBold bool
+		var prefix string
+
+		if m.reportTimeIndex == i {
+			optionColor = whiteColor
+			optionBold = true
+			prefix = "  → "
+		} else {
+			optionColor = defaultTextColor
+			optionBold = false
+			prefix = "    "
+		}
+
+		optionStyle := lipgloss.NewStyle().
+			Foreground(optionColor).
+			Bold(optionBold)
+
+		contentStrings = append(contentStrings, optionStyle.Render(prefix+option))
+	}
+
+	contentStrings = append(contentStrings, "")
+	contentStrings = append(contentStrings, "")
+
+	// If custom date range is selected, show date input (future enhancement)
+	// For now, we'll just show the option
+
+	contentSection := lipgloss.NewStyle().
+		Padding(0, 1).
+		Background(bgColor).
+		Render(strings.Join(contentStrings, "\n"))
+
+	// Create gradient divider
+	divider := createGradientDivider(m.width, gradientColors)
+
+	// Footer
+	escStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("esc")
+	escDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("back")
+	enterStyle := lipgloss.NewStyle().Foreground(cyanColor).Render("enter")
+	enterDesc := lipgloss.NewStyle().Foreground(dimWhiteColor).Render("generate report")
+
+	leftShortcuts := lipgloss.JoinHorizontal(lipgloss.Top, escStyle, " ", escDesc, "    ", enterStyle, " ", enterDesc)
 
 	dots := ""
 	for _, color := range gradientColors {
