@@ -49,6 +49,15 @@ A powerful terminal user interface (TUI) application for tracking and reporting 
 - **Clean gradient design** - Beautiful rainbow gradient headers and dividers
 - **Visual step indicators** - Clear progress tracking in wizard flows
 
+### CLI Mode (Headless)
+- **Command-line interface** - Run reports without the TUI for automation and scripting
+- **Profile-based execution** - Use saved profiles via `-p` flag
+- **Direct project/user override** - Specify projects and users directly via `-proj` and `-u` flags
+- **Multiple output formats** - JSON or Markdown output to stdout
+- **Flexible timeframes** - week, month, m2d (month-to-date), 4w (4 weeks), 30d (30 days)
+- **Optional file saving** - Use `-report` flag to save output to reports directory
+- **Stdout output** - Perfect for piping to other tools or CI/CD pipelines
+
 ## Requirements
 
 - Go 1.24.5 or higher
@@ -89,6 +98,103 @@ go build -o figma-beacon
    - Select a time window (e.g., "Last Week")
    - View your activity report in the terminal
    - Reports are also saved to the `reports/` directory
+
+## CLI Usage (Headless Mode)
+
+Run reports from the command line without the TUI interface - perfect for automation, scripting, and CI/CD pipelines.
+
+### Basic Usage
+
+```bash
+# Run with default profile and default timeframe (week)
+./figma-beacon -p default -t week
+
+# Generate 30-day report and save to file
+./figma-beacon -p myprofile -t 30d -report
+
+# Output as JSON for processing
+./figma-beacon -p default -format json | jq '.TotalFiles'
+
+# Month-to-date report
+./figma-beacon -p default -t m2d
+```
+
+### CLI Flags
+
+- **`-p <profile>`** - Profile name to use (default: uses default profile)
+  - If not specified, uses the default profile
+  - Fails if no default profile exists and no override flags are provided
+
+- **`-t <timeframe>`** - Time window for the report (default: `week`)
+  - `week` or `7d` - Last 7 days
+  - `month` - Previous calendar month
+  - `m2d` or `mtd` - Month to date (current month)
+  - `4w` or `28d` - Last 4 weeks (28 days)
+  - `30d` - Last 30 days
+
+- **`-proj <project_ids>`** - Comma-separated project IDs (overrides profile)
+  - Example: `-proj "123456,789012"`
+  - Must be used with `-u` flag
+  - Shows warning when overriding profile
+
+- **`-u <user_id>`** - User ID (overrides profile user)
+  - Must be used with `-proj` flag
+  - Shows warning when overriding profile
+
+- **`-format <format>`** - Output format (default: `md`)
+  - `md` or `markdown` - Markdown format
+  - `json` - JSON format
+
+- **`-report`** - Save report to `reports/` directory
+  - Files are named: `<profile>-<timestamp>.<format>`
+  - Report is still output to stdout
+
+### Examples
+
+**Profile-based reports:**
+```bash
+# Use default profile with different timeframes
+./figma-beacon -p default -t week
+./figma-beacon -p production -t 30d -format json
+./figma-beacon -p design-system -t m2d -report
+```
+
+**Override profile with specific projects:**
+```bash
+# Monitor specific projects and user
+./figma-beacon -proj "proj123,proj456" -u "user789" -t week
+
+# Generate JSON report for CI/CD pipeline
+./figma-beacon -proj "proj123" -u "user789" -t 30d -format json > report.json
+```
+
+**Scripting and automation:**
+```bash
+# Check if there were any changes this week
+CHANGES=$(./figma-beacon -p default -t week -format json | jq '.TotalChanges')
+if [ "$CHANGES" -gt 0 ]; then
+  echo "Found $CHANGES changes this week"
+fi
+
+# Generate daily report and commit to git
+./figma-beacon -p default -t week -report
+git add reports/
+git commit -m "Daily activity report $(date +%Y-%m-%d)"
+```
+
+**Run without TUI (headless):**
+```bash
+# All commands run in headless mode automatically when flags are provided
+# No need to specify a special headless flag
+./figma-beacon -p default -t 30d | mail -s "Monthly Report" team@company.com
+```
+
+### Notes
+
+- **Profile override warning**: When using `-proj` and `-u` flags, the application will warn you that profile settings are being overridden
+- **No flags = TUI mode**: Running `./figma-beacon` without any flags launches the interactive TUI
+- **Stdout + file**: Using `-report` flag outputs to both stdout and saves to file
+- **Error handling**: All errors are written to stderr, keeping stdout clean for piping
 
 ## Keyboard Controls
 
