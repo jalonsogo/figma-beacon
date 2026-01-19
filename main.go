@@ -437,34 +437,7 @@ func deleteProfile(name string) error {
 	return os.Remove(filePath)
 }
 
-func initialModel() model {
-	ti := textinput.New()
-	ti.Placeholder = ""
-	ti.CharLimit = 256
-	ti.Width = 80
-	ti.Prompt = ""
-
-	// Load saved configuration
-	cfg, _ := loadConfig()
-
-	// Load profiles
-	profiles, _ := loadAllProfiles()
-
-	// Find default profile
-	var activeProfile *Profile
-	for i := range profiles {
-		if profiles[i].IsDefault {
-			activeProfile = &profiles[i]
-			break
-		}
-	}
-
-	profileStatus := "⬥ No profile selected"
-	if activeProfile != nil {
-		profileStatus = "⬥ Profile: " + activeProfile.Name
-	}
-
-	// Build menu items with profiles integrated
+func buildMenuItems(profiles []Profile) []menuItem {
 	menuItems := []menuItem{
 		{
 			title:       "",
@@ -520,6 +493,39 @@ func initialModel() model {
 		title:       "",
 		description: "",
 	})
+
+	return menuItems
+}
+
+func initialModel() model {
+	ti := textinput.New()
+	ti.Placeholder = ""
+	ti.CharLimit = 256
+	ti.Width = 80
+	ti.Prompt = ""
+
+	// Load saved configuration
+	cfg, _ := loadConfig()
+
+	// Load profiles
+	profiles, _ := loadAllProfiles()
+
+	// Find default profile
+	var activeProfile *Profile
+	for i := range profiles {
+		if profiles[i].IsDefault {
+			activeProfile = &profiles[i]
+			break
+		}
+	}
+
+	profileStatus := "⬥ No profile selected"
+	if activeProfile != nil {
+		profileStatus = "⬥ Profile: " + activeProfile.Name
+	}
+
+	// Build menu items with profiles integrated
+	menuItems := buildMenuItems(profiles)
 
 	return model{
 		menuItems:           menuItems,
@@ -995,6 +1001,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.profileStatus = "⬥ Profile: " + profile.Name
 					}
 
+					// Rebuild menu items to reflect updated profile names
+					m.menuItems = buildMenuItems(m.profiles)
+
 					// Reset wizard state
 					m.wizardEditMode = false
 					m.previewProfile = nil
@@ -1177,6 +1186,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 						}
 
+						// Rebuild menu items to reflect profile deletion
+						m.menuItems = buildMenuItems(m.profiles)
+
 						// Reset cursor if needed
 						if m.listCursor > len(m.profiles) {
 							m.listCursor = len(m.profiles)
@@ -1235,6 +1247,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							break
 						}
 					}
+					// Rebuild menu items to reflect default profile change
+					m.menuItems = buildMenuItems(m.profiles)
 				}
 				return m, nil
 			case "enter":
@@ -1423,12 +1437,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							break
 						}
 					}
-					// Rebuild menu items
-					oldWidth := m.width
-					oldHeight := m.height
-					m = initialModel()
-					m.width = oldWidth
-					m.height = oldHeight
+					// Rebuild menu items to reflect active profile change
+					m.menuItems = buildMenuItems(m.profiles)
 				}
 			}
 		}
