@@ -287,9 +287,9 @@ go build -o figma-beacon
 - Try selecting a different time window
 - Verify the profile contains the correct projects
 
-## License
+## LOLcense
 
-MIT License - See LICENSE file for details
+For {root} sake I'm a designer. Mostly all the code has been written by Claude and ad latere.
 
 ## Contributing
 
